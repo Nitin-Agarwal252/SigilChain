@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -63,13 +64,32 @@ def _protect(record: dict[str, Any], passphrase: str) -> dict[str, Any]:
 
 def _write_private(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+    temporary_path: Path | None = None
     try:
-        os.chmod(temp, 0o600)
-    except OSError:
-        pass
-    os.replace(temp, path)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(data, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name != "nt":
+            os.chmod(temporary_path, 0o600)
+        # A hard link publishes the complete key file and refuses to replace
+        # a destination created by another enrollment or rotation process.
+        os.link(temporary_path, path)
+        temporary_path.unlink()
+        if os.name != "nt":
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def _new_key_record(recipient_id: str, version: int) -> tuple[dict[str, Any], dict[str, Any]]:

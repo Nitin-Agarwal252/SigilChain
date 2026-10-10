@@ -16,7 +16,7 @@ from sigilchain import config, ledger
 from sigilchain.crypto import decrypt_pdf, encrypt_pdf
 from sigilchain.documents import DocumentError, normalize
 from sigilchain.events import build_claim, sign_claim, verify_claim
-from sigilchain.identity import enroll, load_private, lookup_identity, register_public, rotate, revoke
+from sigilchain.identity import _write_private, enroll, load_private, lookup_identity, register_public, rotate, revoke
 from sigilchain.quorum import _effective_quorum, submit_to_quorum
 from sigilchain.watermark import embed_page, extract_page, new_watermark_id
 
@@ -90,6 +90,16 @@ class IdentityAndCryptoTests(unittest.TestCase):
         self.assertEqual(lookup_identity("alice", self.db, key_version=1, allow_revoked=True)["sig_public"], first["sig_public"])
         revoke("alice", self.db)
         self.assertIsNone(lookup_identity("alice", self.db))
+
+    def test_private_key_publication_never_overwrites_existing_file(self):
+        path = Path(config.KEYS_DIR) / "alice.json"
+        path.parent.mkdir(parents=True)
+        original = {"key": "first"}
+        _write_private(path, original)
+        with self.assertRaises(FileExistsError):
+            _write_private(path, {"key": "replacement"})
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+        self.assertEqual(list(path.parent.iterdir()), [path])
 
     def test_public_identity_import_rejects_malformed_key_material(self):
         public = enroll("alice", "correct horse battery", self.db)
