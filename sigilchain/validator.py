@@ -11,7 +11,7 @@ from typing import Any
 
 import oqs
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import config, ledger
 from .events import is_well_formed_claim, verify_claim
@@ -49,9 +49,10 @@ VALIDATOR_SECRET, VALIDATOR_PUBLIC = _load_signing_key()
 
 
 class SubmitRequest(BaseModel):
-    watermark_id: str
+    watermark_id: str = Field(min_length=24, max_length=24)
     claim: dict[str, Any]
-    signature_hex: str
+    # ML-DSA-65 signatures are 3309 bytes (6618 hexadecimal characters).
+    signature_hex: str = Field(min_length=6618, max_length=6618)
 
 
 def _sign_receipt(entry: dict) -> dict:

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from sigilchain import config
 from sigilchain.ledger import LedgerUnavailable, get_event
@@ -27,13 +28,17 @@ class EtcdIntegrationTests(unittest.TestCase):
             request = validator.SubmitRequest(
                 watermark_id="ab" * 12,
                 claim={"schema": "sigilchain-decrypt-claim-v1", "recipient_id": []},
-                signature_hex="00",
+                signature_hex="00" * 3309,
             )
             with patch.object(validator, "lookup_identity") as lookup:
                 with self.assertRaises(HTTPException) as raised:
                     validator.submit(request, None)
             self.assertEqual(raised.exception.status_code, 400)
             lookup.assert_not_called()
+            with self.assertRaises(ValidationError):
+                validator.SubmitRequest(watermark_id="short", claim={}, signature_hex="00")
+            with self.assertRaises(ValidationError):
+                validator.SubmitRequest(watermark_id="ab" * 12, claim={}, signature_hex="00" * 3310)
 
 
 if __name__ == "__main__":
