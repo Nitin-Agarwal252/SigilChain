@@ -50,6 +50,13 @@ class EtcdIntegrationTests(unittest.TestCase):
                             )
             lookup.assert_not_called()
             with self.assertRaises(ValidationError):
+                validator.SubmitRequest(
+                    watermark_id="ab" * 12,
+                    claim=valid_claim,
+                    signature_hex="00" * 3309,
+                    unexpected="field",
+                )
+            with self.assertRaises(ValidationError):
                 validator.SubmitRequest(watermark_id="short", claim={}, signature_hex="00")
             with self.assertRaises(ValidationError):
                 validator.SubmitRequest(watermark_id="ab" * 12, claim={}, signature_hex="00" * 3310)

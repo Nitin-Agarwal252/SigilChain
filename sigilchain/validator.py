@@ -47,7 +47,12 @@ def _load_signing_key() -> tuple[bytes, bytes]:
 VALIDATOR_SECRET, VALIDATOR_PUBLIC = _load_signing_key()
 
 
-class DecryptionClaimRequest(BaseModel):
+class StrictRequestModel(BaseModel):
+    class Config:
+        extra = "forbid"
+
+
+class DecryptionClaimRequest(StrictRequestModel):
     """Bounded v1 claim shape; semantic checks remain in events.py."""
     claim_schema: Literal["sigilchain-decrypt-claim-v1"] = Field(alias="schema")
     document_id: StrictStr = Field(min_length=1, max_length=64)
@@ -57,11 +62,7 @@ class DecryptionClaimRequest(BaseModel):
     timestamp_claim: StrictInt = Field(ge=1)
     marked_file_sha256: StrictStr = Field(min_length=64, max_length=64)
 
-    class Config:
-        extra = "forbid"
-
-
-class SubmitRequest(BaseModel):
+class SubmitRequest(StrictRequestModel):
     watermark_id: StrictStr = Field(min_length=24, max_length=24)
     claim: DecryptionClaimRequest
     # ML-DSA-65 signatures are 3309 bytes (6618 hexadecimal characters).
