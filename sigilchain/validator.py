@@ -10,7 +10,7 @@ from typing import Literal
 
 import oqs
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from pydantic import BaseModel, Field, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from . import config, ledger
 from .events import is_well_formed_claim, verify_claim
@@ -48,8 +48,7 @@ VALIDATOR_SECRET, VALIDATOR_PUBLIC = _load_signing_key()
 
 
 class StrictRequestModel(BaseModel):
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class DecryptionClaimRequest(StrictRequestModel):
@@ -109,7 +108,7 @@ def identity(recipient_id: str, key_version: int | None = Query(default=None),
 def submit(request: SubmitRequest, _: None = Depends(_auth)) -> dict:
     # Use an ordinary mapping for canonical signing and persistence. The
     # semantic validator below also enforces safe IDs and lowercase hex.
-    claim = request.claim.dict(by_alias=True)
+    claim = request.claim.model_dump(by_alias=True)
     if not is_well_formed_claim(claim):
         raise HTTPException(400, "Malformed decryption claim.")
     if claim.get("watermark_id") != request.watermark_id:

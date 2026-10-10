@@ -55,6 +55,7 @@ feature is not marked verified until its check has been run successfully.
 - Validator HTTP requests constrain watermark IDs and ML-DSA-65 signature hex fields to expected lengths before application-level claim validation.
 - Validator submission parses v1 claims with a strict bounded model: exact schema literal, strict strings/integers, capped field lengths, and no unknown fields; semantic safe-ID and lowercase-hex checks still run before registry lookup.
 - Validator HTTP request objects reject unknown top-level fields as well as unknown claim fields.
+- Validator request models use Pydantic 2's explicit strict-model configuration and alias-aware serialization.
 - Malformed evidence structures (wrong top-level, claim, identity, evidence-list, and ledger-entry types) fail closed with verification errors rather than crashing the verifier.
 - Same-host offline-import simulation passes: exported all required images, rejected a modified README before image loading, then loaded the clean archive and started Compose with `--no-build --pull never`; validator health returned 200 using the etcd-Raft backend.
 
