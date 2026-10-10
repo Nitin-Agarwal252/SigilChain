@@ -182,8 +182,6 @@ def lookup_identity(recipient_id: str, db_path: str | None = None,
 
 def load_private(recipient_id: str, passphrase: str | None = None, key_version: int | None = None) -> dict[str, Any]:
     identity = lookup_identity(recipient_id, key_version=key_version, allow_revoked=True)
-    if identity is None:
-        raise KeyError(f"No registered identity for {recipient_id!r}.")
     version = key_version or (identity["key_version"] if identity else 1)
     path = _private_path(recipient_id, version)
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -202,9 +200,10 @@ def load_private(recipient_id: str, passphrase: str | None = None, key_version: 
         raise ValueError("Unlocked private key has an invalid identity record.")
     if (private["recipient_id"] != recipient_id or type(private["key_version"]) is not int
             or private["key_version"] != version
-            or private["kem_alg"] != KEM_ALG or private["sig_alg"] != SIG_ALG
-            or private["kem_public"] != identity["kem_public"]
-            or private["sig_public"] != identity["sig_public"]):
+            or private["kem_alg"] != KEM_ALG or private["sig_alg"] != SIG_ALG):
+        raise ValueError("Unlocked private key does not match the registered recipient identity.")
+    if identity and (private["kem_public"] != identity["kem_public"]
+                     or private["sig_public"] != identity["sig_public"]):
         raise ValueError("Unlocked private key does not match the registered recipient identity.")
     try:
         with oqs.KeyEncapsulation(KEM_ALG) as encapsulator:
