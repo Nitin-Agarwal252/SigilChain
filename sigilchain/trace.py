@@ -11,6 +11,7 @@ from PIL import Image, ImageSequence
 
 from . import config
 from .evidence import make_bundle
+from .geometric import correct_photo
 from .quorum import check_watermark
 from .watermark import extract_page
 
@@ -72,18 +73,33 @@ def image_pages(data: bytes, filename: str) -> list[np.ndarray]:
 
 
 def trace_page(page: np.ndarray, nodes: list[str] | None = None,
-               threshold: float = 0.72) -> dict:
+               threshold: float = 0.72, photo_capture: bool = False) -> dict:
     if isinstance(threshold, bool) or not isinstance(threshold, Real) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
         raise ValueError("Watermark confidence threshold must be a finite number between 0 and 1.")
     try:
+        recovery_path = "original image"
+        if photo_capture:
+            corrected = correct_photo(page)
+            if corrected is None:
+                return {"status": "inconclusive", "reason":
+                        "Could not find a page boundary for photo correction. Try a clearer, more front-facing capture or turn photo correction off."}
+            page, alignment_confidence = corrected
+            if alignment_confidence < threshold:
+                return {"status": "inconclusive", "confidence": alignment_confidence,
+                        "reason": "Photo alignment confidence was too low to trust watermark recovery."}
+            recovery_path = "experimental photo perspective and grid correction"
         watermark_id, confidence = extract_page(page)
-    except Exception as exc:
-        return {"status": "extraction_failed", "error": str(exc)}
+    except Exception:
+        return {"status": "inconclusive", "reason":
+                "Could not decode a valid watermark payload. The image may be too damaged or misaligned; do not attribute this copy."}
     if confidence < threshold:
-        return {"status": "inconclusive", "watermark_id": watermark_id.hex(), "confidence": confidence}
+        return {"status": "inconclusive", "watermark_id": watermark_id.hex(), "confidence": confidence,
+                "recovery_path": recovery_path}
     matches = check_watermark(config.NODE_URLS if nodes is None else nodes, watermark_id.hex())
     if not matches:
         return {"status": "unverified", "watermark_id": watermark_id.hex(), "confidence": confidence,
+                "recovery_path": recovery_path,
                 "reason": "No configured quorum of valid pinned validator receipts and chain proofs."}
     return {"status": "verified", "watermark_id": watermark_id.hex(), "confidence": confidence,
-            "bundle": make_bundle(watermark_id.hex(), matches, confidence, "uploaded page")}
+            "recovery_path": recovery_path,
+            "bundle": make_bundle(watermark_id.hex(), matches, confidence, recovery_path)}
