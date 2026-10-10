@@ -35,6 +35,18 @@ class EtcdIntegrationTests(unittest.TestCase):
 
             response = asyncio.run(post_oversized_request())
             self.assertEqual(response.status_code, 413)
+
+            async def post_chunked_oversized_request():
+                async def chunks():
+                    yield b"{" + b" " * 9000
+                    yield b" " * 8000 + b"}"
+
+                transport = httpx.ASGITransport(app=validator.app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                    return await client.post("/submit", content=chunks())
+
+            chunked_response = asyncio.run(post_chunked_oversized_request())
+            self.assertEqual(chunked_response.status_code, 413)
             with patch.object(validator, "lookup_identity") as lookup:
                 valid_claim = {
                     "schema": "sigilchain-decrypt-claim-v1",

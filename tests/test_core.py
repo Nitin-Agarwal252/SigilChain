@@ -194,6 +194,9 @@ class LocalLedgerTests(unittest.TestCase):
             db = str(Path(directory) / "ledger.db")
             with patch.dict(os.environ, {"SIGILCHAIN_LOCAL_LEDGER": db}):
                 first = ledger.append_event("wm-a", {"watermark_id": "wm-a"}, "11")
+                self.assertEqual(ledger.append_event("wm-a", {"watermark_id": "wm-a"}, "11"), first)
+                with self.assertRaisesRegex(ValueError, "already commits"):
+                    ledger.append_event("wm-a", {"watermark_id": "other"}, "22")
                 ledger.append_event("wm-b", {"watermark_id": "wm-b"}, "22")
                 self.assertEqual(ledger.get_event("wm-a"), first)
                 proof = ledger.get_chain_proof("wm-b")

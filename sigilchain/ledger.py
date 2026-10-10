@@ -136,6 +136,14 @@ def append_event(watermark_id: str, claim: dict, signature_hex: str) -> dict:
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE IF NOT EXISTS entries (sequence INTEGER PRIMARY KEY AUTOINCREMENT, watermark_id TEXT UNIQUE, payload TEXT NOT NULL)")
     conn.execute("BEGIN IMMEDIATE")
+    existing_row = conn.execute("SELECT payload FROM entries WHERE watermark_id=?", (watermark_id,)).fetchone()
+    if existing_row:
+        existing = json.loads(existing_row[0])
+        conn.rollback()
+        conn.close()
+        if existing["claim_json"] == claim_json and existing["signature_hex"] == signature_hex:
+            return existing
+        raise ValueError("Watermark ID already commits to a different claim.")
     row = conn.execute("SELECT sequence,payload FROM entries ORDER BY sequence DESC LIMIT 1").fetchone()
     previous = GENESIS
     sequence = 1

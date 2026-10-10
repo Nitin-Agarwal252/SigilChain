@@ -11,31 +11,76 @@ from typing import Literal
 import oqs
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
-from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from . import config, ledger
 from .events import is_well_formed_claim, verify_claim
 from .identity import SIG_ALG, lookup_identity
 
-app = FastAPI(title="SigilChain Validator", version="1")
 MAX_SUBMIT_REQUEST_BYTES = 16 * 1024
 
 
-@app.middleware("http")
-async def limit_submit_request_size(request: Request, call_next):
-    if request.method == "POST" and request.url.path == "/submit":
-        raw_length = request.headers.get("content-length")
+class SubmitBodySizeLimitMiddleware:
+    """Bound submit JSON before FastAPI buffers or parses it."""
+    def __init__(self, app, max_bytes: int = MAX_SUBMIT_REQUEST_BYTES):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if (scope["type"] != "http" or scope["method"] != "POST"
+                or scope["path"] != "/submit"):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        raw_length = headers.get(b"content-length")
         if raw_length is not None:
             try:
-                content_length = int(raw_length)
-            except ValueError:
-                return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length."})
+                content_length = int(raw_length.decode("ascii"))
+            except (UnicodeDecodeError, ValueError):
+                response = JSONResponse(status_code=400, content={"detail": "Invalid Content-Length."})
+                await response(scope, receive, send)
+                return
             if content_length < 0:
-                return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length."})
-            if content_length > MAX_SUBMIT_REQUEST_BYTES:
-                return JSONResponse(status_code=413, content={"detail": "Submission request is too large."})
-    return await call_next(request)
+                response = JSONResponse(status_code=400, content={"detail": "Invalid Content-Length."})
+                await response(scope, receive, send)
+                return
+            if content_length > self.max_bytes:
+                response = JSONResponse(status_code=413, content={"detail": "Submission request is too large."})
+                await response(scope, receive, send)
+                return
+
+        chunks = []
+        total = 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            total += len(chunk)
+            if total > self.max_bytes:
+                response = JSONResponse(status_code=413, content={"detail": "Submission request is too large."})
+                await response(scope, receive, send)
+                return
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+
+        body = b"".join(chunks)
+        body_pending = True
+
+        async def replay_receive():
+            nonlocal body_pending
+            if body_pending:
+                body_pending = False
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.disconnect"}
+
+        await self.app(scope, replay_receive, send)
+
+
+app = FastAPI(title="SigilChain Validator", version="1")
+app.add_middleware(SubmitBodySizeLimitMiddleware)
 
 
 def _auth(value: str | None = Header(default=None, alias=config.API_KEY_HEADER)) -> None:
