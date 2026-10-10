@@ -11,12 +11,31 @@ from typing import Literal
 import oqs
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from . import config, ledger
 from .events import is_well_formed_claim, verify_claim
 from .identity import SIG_ALG, lookup_identity
 
 app = FastAPI(title="SigilChain Validator", version="1")
+MAX_SUBMIT_REQUEST_BYTES = 16 * 1024
+
+
+@app.middleware("http")
+async def limit_submit_request_size(request: Request, call_next):
+    if request.method == "POST" and request.url.path == "/submit":
+        raw_length = request.headers.get("content-length")
+        if raw_length is not None:
+            try:
+                content_length = int(raw_length)
+            except ValueError:
+                return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length."})
+            if content_length < 0:
+                return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length."})
+            if content_length > MAX_SUBMIT_REQUEST_BYTES:
+                return JSONResponse(status_code=413, content={"detail": "Submission request is too large."})
+    return await call_next(request)
 
 
 def _auth(value: str | None = Header(default=None, alias=config.API_KEY_HEADER)) -> None:

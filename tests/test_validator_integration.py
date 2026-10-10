@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import unittest
 import importlib
+import asyncio
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 from pydantic import ValidationError
+import httpx
 
 from sigilchain import config
 from sigilchain.ledger import LedgerUnavailable, get_event
@@ -24,6 +26,15 @@ class EtcdIntegrationTests(unittest.TestCase):
             config, "VALIDATOR_KEY_PATH", str(Path(directory) / "validator.json")
         ):
             validator = importlib.import_module("sigilchain.validator")
+            async def post_oversized_request():
+                transport = httpx.ASGITransport(app=validator.app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                    return await client.post(
+                        "/submit", json={"extra": "x" * validator.MAX_SUBMIT_REQUEST_BYTES}
+                    )
+
+            response = asyncio.run(post_oversized_request())
+            self.assertEqual(response.status_code, 413)
             with patch.object(validator, "lookup_identity") as lookup:
                 valid_claim = {
                     "schema": "sigilchain-decrypt-claim-v1",
