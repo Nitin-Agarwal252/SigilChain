@@ -182,6 +182,8 @@ def lookup_identity(recipient_id: str, db_path: str | None = None,
 
 def load_private(recipient_id: str, passphrase: str | None = None, key_version: int | None = None) -> dict[str, Any]:
     identity = lookup_identity(recipient_id, key_version=key_version, allow_revoked=True)
+    if identity is None:
+        raise KeyError(f"No registered identity for {recipient_id!r}.")
     version = key_version or (identity["key_version"] if identity else 1)
     path = _private_path(recipient_id, version)
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -191,9 +193,36 @@ def load_private(recipient_id: str, passphrase: str | None = None, key_version: 
     key = Scrypt(salt=bytes.fromhex(data["salt"]), length=32, n=2**15, r=8, p=1).derive(passphrase.encode())
     aad = f"{_KEY_FORMAT}:{recipient_id}:{version}".encode()
     try:
-        return json.loads(AESGCM(key).decrypt(bytes.fromhex(data["nonce"]), bytes.fromhex(data["ciphertext"]), aad))
+        private = json.loads(AESGCM(key).decrypt(bytes.fromhex(data["nonce"]), bytes.fromhex(data["ciphertext"]), aad))
     except Exception as exc:
         raise ValueError("Private key could not be unlocked; check the passphrase and key file.") from exc
+    expected_fields = {"recipient_id", "key_version", "kem_alg", "sig_alg", "kem_public", "kem_secret",
+                       "sig_public", "sig_secret"}
+    if not isinstance(private, dict) or set(private) != expected_fields:
+        raise ValueError("Unlocked private key has an invalid identity record.")
+    if (private["recipient_id"] != recipient_id or type(private["key_version"]) is not int
+            or private["key_version"] != version
+            or private["kem_alg"] != KEM_ALG or private["sig_alg"] != SIG_ALG
+            or private["kem_public"] != identity["kem_public"]
+            or private["sig_public"] != identity["sig_public"]):
+        raise ValueError("Unlocked private key does not match the registered recipient identity.")
+    try:
+        with oqs.KeyEncapsulation(KEM_ALG) as encapsulator:
+            kem_ciphertext, shared_secret = encapsulator.encap_secret(bytes.fromhex(private["kem_public"]))
+        with oqs.KeyEncapsulation(KEM_ALG, secret_key=bytes.fromhex(private["kem_secret"])) as kem:
+            if kem.decap_secret(kem_ciphertext) != shared_secret:
+                raise ValueError("Recipient ML-KEM key pair does not match.")
+        challenge = b"SigilChain recipient key self-check v1"
+        with oqs.Signature(SIG_ALG, secret_key=bytes.fromhex(private["sig_secret"])) as signer:
+            signature = signer.sign(challenge)
+        with oqs.Signature(SIG_ALG) as verifier:
+            if not verifier.verify(challenge, signature, bytes.fromhex(private["sig_public"])):
+                raise ValueError("Recipient ML-DSA key pair does not match.")
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("Unlocked recipient key material is malformed or does not match its public keys.") from exc
+    return private
 
 
 def rotate(recipient_id: str, passphrase: str | None = None, db_path: str | None = None) -> dict[str, Any]:
