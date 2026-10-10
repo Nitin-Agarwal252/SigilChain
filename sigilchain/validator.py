@@ -132,12 +132,18 @@ def _persist_signing_key(path: Path, private_key: bytes, public_key: bytes) -> N
 
 
 def _auth(value: str | None = Header(default=None, alias=config.API_KEY_HEADER)) -> None:
-    expected = config.API_KEY
-    if len(expected.encode("utf-8")) < 32:
+    expected_keys = (config.API_KEY, config.API_KEY_PREVIOUS)
+    if (len(expected_keys[0].encode("utf-8")) < 32
+            or (expected_keys[1] and len(expected_keys[1].encode("utf-8")) < 32)):
         raise HTTPException(status_code=503,
-                            detail="Validator API key is not configured with at least 32 bytes.")
+                            detail="Validator API key configuration requires keys of at least 32 bytes.")
     supplied = value.encode("utf-8") if isinstance(value, str) else b""
-    if not hmac.compare_digest(supplied, expected.encode("utf-8")):
+    authenticated = False
+    for expected in expected_keys:
+        if expected:
+            matched = hmac.compare_digest(supplied, expected.encode("utf-8"))
+            authenticated = authenticated | matched
+    if not authenticated:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 

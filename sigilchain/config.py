@@ -18,6 +18,7 @@ VALIDATOR_KEY_PATH = os.environ.get("SIGILCHAIN_VALIDATOR_KEY_PATH", f"validator
 VALIDATOR_TRUST = os.environ.get("SIGILCHAIN_VALIDATOR_TRUST_FILE", "validator_trust.json")
 ETCD_ENDPOINTS = csv_env("SIGILCHAIN_ETCD_ENDPOINTS")
 API_KEY = os.environ.get("SIGILCHAIN_API_KEY", "")
+API_KEY_PREVIOUS = os.environ.get("SIGILCHAIN_API_KEY_PREVIOUS", "")
 API_KEY_HEADER = "X-SigilChain-API-Key"
 PDF_DPI = int(os.environ.get("SIGILCHAIN_PDF_DPI", "150"))
 WATERMARK_TRANSFORM = os.environ.get("SIGILCHAIN_WATERMARK_TRANSFORM", "dct").lower()

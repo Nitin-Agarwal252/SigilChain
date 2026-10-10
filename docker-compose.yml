@@ -43,6 +43,7 @@ services:
       SIGILCHAIN_VALIDATOR_ID: validator1
       SIGILCHAIN_VALIDATOR_KEY_PATH: /data/validator1/validator_signing_key.json
       SIGILCHAIN_API_KEY: ${SIGILCHAIN_API_KEY:-}
+      SIGILCHAIN_API_KEY_PREVIOUS: ${SIGILCHAIN_API_KEY_PREVIOUS:-}
       SIGILCHAIN_ETCD_ENDPOINTS: http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
     volumes: [identity_shared:/data/shared, validator1_keys:/data/validator1]
     networks: [sigilchain]
@@ -92,6 +93,7 @@ services:
       SIGILCHAIN_VALIDATOR_TRUST_FILE: /data/trust/validator_trust.json
       SIGILCHAIN_WATERMARK_TRANSFORM: ${SIGILCHAIN_WATERMARK_TRANSFORM:-dct}
       SIGILCHAIN_API_KEY: ${SIGILCHAIN_API_KEY:-}
+      SIGILCHAIN_API_KEY_PREVIOUS: ${SIGILCHAIN_API_KEY_PREVIOUS:-}
     volumes: [identity_shared:/data/shared, validator_trust:/data/trust]
     networks: [sigilchain]
     depends_on: [validator1, validator2, validator3]
@@ -118,6 +120,7 @@ services:
       SIGILCHAIN_VALIDATOR_TRUST_FILE: /data/trust/validator_trust.json
       SIGILCHAIN_WATERMARK_TRANSFORM: ${SIGILCHAIN_WATERMARK_TRANSFORM:-dct}
       SIGILCHAIN_API_KEY: ${SIGILCHAIN_API_KEY:-}
+      SIGILCHAIN_API_KEY_PREVIOUS: ${SIGILCHAIN_API_KEY_PREVIOUS:-}
       SIGILCHAIN_ETCD_ENDPOINTS: http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
     volumes: ["./cli-data:/data", identity_shared:/data/shared, validator_trust:/data/trust]
     working_dir: /app

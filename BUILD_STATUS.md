@@ -62,6 +62,7 @@ feature is not marked verified until its check has been run successfully.
 - Newly generated validator signing keys are written through a flushed temporary file and atomically replaced into place; POSIX files remain mode 0600, avoiding partially written or broadly readable key files.
 - Validator key-file publication is exclusive: a concurrent startup cannot replace an already published validator key.
 - Validator APIs now fail closed unless `SIGILCHAIN_API_KEY` is configured with at least 32 UTF-8 bytes; configured keys are compared in constant time. Quick-start, air-gap import instructions, and the test harness reflect the requirement.
+- API key rotation now permits the active key and one temporary previous key, compares each configured key in constant time, and rejects invalid short previous-key configuration. Compose propagates the optional previous key; test harness clears/restores it and operator rotation steps are documented.
 - Malformed evidence structures (wrong top-level, claim, identity, evidence-list, and ledger-entry types) fail closed with verification errors rather than crashing the verifier.
 - Same-host offline-import simulation passes: exported all required images, rejected a modified README before image loading, then loaded the clean archive and started Compose with `--no-build --pull never`; validator health returned 200 using the etcd-Raft backend.
 

@@ -47,6 +47,7 @@ frames and 120 million grayscale raster pixels per document to limit memory use.
 - The Compose demo runs all members on one Docker host. It is a shared failure domain and does not meet a strong “no single administrator can alter anything” guarantee against a host administrator. For stronger deployment, separate validators and protect signing keys on independent hosts/hardware.
 - The trace console requires pinned validator keys and a configured quorum. Missing keys, invalid signatures, broken proofs, or insufficient receipts are inconclusive/fail closed.
 - Validator APIs require the same operator-managed 32-byte-minimum `SIGILCHAIN_API_KEY` across clients and validator containers; missing configuration fails closed. The key is shared through the offline environment, not a cloud KMS.
+- For rotation, set the new `SIGILCHAIN_API_KEY` and temporarily set the old value as `SIGILCHAIN_API_KEY_PREVIOUS` for validators and clients, then recreate the Compose services. Once all clients use the new key, remove `SIGILCHAIN_API_KEY_PREVIOUS` and recreate services again. If configured, the previous key must also be at least 32 bytes.
 - Watermarks use repeated DCT carriers and Reed–Solomon coding. The optional Haar DWT + DCT mode is experimental. Photo correction is experimental; no camera-capture resistance is claimed without tests on that exact transformation.
 
 ## Offline transfer

@@ -1,6 +1,8 @@
 $ErrorActionPreference = "Stop"
 $previousApiKey = [Environment]::GetEnvironmentVariable("SIGILCHAIN_API_KEY", "Process")
+$previousApiKeyPrevious = [Environment]::GetEnvironmentVariable("SIGILCHAIN_API_KEY_PREVIOUS", "Process")
 $env:SIGILCHAIN_API_KEY = "sigilchain-test-only-key-not-for-production-0001"
+Remove-Item Env:SIGILCHAIN_API_KEY_PREVIOUS -ErrorAction SilentlyContinue
 try {
     docker compose --profile tools run --rm cli python -m unittest discover -s /app/tests -v
     if ($LASTEXITCODE -ne 0) { throw "Core acceptance tests failed" }
@@ -11,5 +13,10 @@ try {
         Remove-Item Env:SIGILCHAIN_API_KEY -ErrorAction SilentlyContinue
     } else {
         $env:SIGILCHAIN_API_KEY = $previousApiKey
+    }
+    if ($null -eq $previousApiKeyPrevious) {
+        Remove-Item Env:SIGILCHAIN_API_KEY_PREVIOUS -ErrorAction SilentlyContinue
+    } else {
+        $env:SIGILCHAIN_API_KEY_PREVIOUS = $previousApiKeyPrevious
     }
 }

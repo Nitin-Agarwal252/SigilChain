@@ -24,22 +24,36 @@ from sigilchain.ledger import LedgerUnavailable, get_event
 class EtcdIntegrationTests(unittest.TestCase):
     def test_api_authentication_fails_closed_without_configured_key(self):
         validator = importlib.import_module("sigilchain.validator")
-        with patch.object(config, "API_KEY", ""):
+        with patch.object(config, "API_KEY", ""), patch.object(config, "API_KEY_PREVIOUS", ""):
             with self.assertRaises(HTTPException) as missing:
                 validator._auth(None)
         self.assertEqual(missing.exception.status_code, 503)
 
-        with patch.object(config, "API_KEY", "s" * 31):
+        with patch.object(config, "API_KEY", "s" * 31), patch.object(config, "API_KEY_PREVIOUS", ""):
             with self.assertRaises(HTTPException) as short:
                 validator._auth("s" * 31)
         self.assertEqual(short.exception.status_code, 503)
 
         configured_key = "k" * 32
-        with patch.object(config, "API_KEY", configured_key):
+        with patch.object(config, "API_KEY", configured_key), patch.object(config, "API_KEY_PREVIOUS", ""):
             validator._auth(configured_key)
             with self.assertRaises(HTTPException) as rejected:
                 validator._auth("wrong-key")
         self.assertEqual(rejected.exception.status_code, 401)
+
+        previous_key = "p" * 32
+        with patch.object(config, "API_KEY", configured_key), patch.object(
+                config, "API_KEY_PREVIOUS", previous_key):
+            validator._auth(configured_key)
+            validator._auth(previous_key)
+            with self.assertRaises(HTTPException) as rejected_with_rotation:
+                validator._auth("wrong-key")
+        self.assertEqual(rejected_with_rotation.exception.status_code, 401)
+
+        with patch.object(config, "API_KEY", configured_key), patch.object(config, "API_KEY_PREVIOUS", "p" * 31):
+            with self.assertRaises(HTTPException) as invalid_previous:
+                validator._auth(configured_key)
+        self.assertEqual(invalid_previous.exception.status_code, 503)
 
     def test_validator_signing_pair_check_rejects_mismatch(self):
         validator = importlib.import_module("sigilchain.validator")
