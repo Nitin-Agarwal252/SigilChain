@@ -10,12 +10,25 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 import httpx
+import oqs
 
 from sigilchain import config
+from sigilchain.identity import SIG_ALG
 from sigilchain.ledger import LedgerUnavailable, get_event
 
 
 class EtcdIntegrationTests(unittest.TestCase):
+    def test_validator_signing_pair_check_rejects_mismatch(self):
+        validator = importlib.import_module("sigilchain.validator")
+        with oqs.Signature(SIG_ALG) as first_signer:
+            first_public = first_signer.generate_keypair()
+            first_private = first_signer.export_secret_key()
+        with oqs.Signature(SIG_ALG) as second_signer:
+            second_public = second_signer.generate_keypair()
+        validator._check_signing_keypair(first_private, first_public)
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            validator._check_signing_keypair(first_private, second_public)
+
     def test_unavailable_cluster_fails_closed(self):
         with patch.object(config, "ETCD_ENDPOINTS", ["http://127.0.0.1:1"]):
             with self.assertRaises(LedgerUnavailable):

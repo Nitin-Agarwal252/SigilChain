@@ -83,6 +83,21 @@ app = FastAPI(title="SigilChain Validator", version="1")
 app.add_middleware(SubmitBodySizeLimitMiddleware)
 
 
+def _check_signing_keypair(private_key: bytes, public_key: bytes) -> None:
+    """Fail startup if persisted PQ signing material is corrupt or mismatched."""
+    challenge = b"SigilChain validator signing-key self-check v1"
+    try:
+        with oqs.Signature(SIG_ALG, secret_key=private_key) as signer:
+            signature = signer.sign(challenge)
+        with oqs.Signature(SIG_ALG) as verifier:
+            if not verifier.verify(challenge, signature, public_key):
+                raise RuntimeError("Validator signing key pair does not match")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("Validator signing key material is invalid") from exc
+
+
 def _auth(value: str | None = Header(default=None, alias=config.API_KEY_HEADER)) -> None:
     if config.API_KEY and value != config.API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -93,9 +108,18 @@ def _load_signing_key() -> tuple[bytes, bytes]:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         value = json.loads(path.read_text(encoding="utf-8"))
-        if value.get("sig_alg") != SIG_ALG:
-            raise RuntimeError("Unsupported validator signing algorithm")
-        return bytes.fromhex(value["private_key_hex"]), bytes.fromhex(value["public_key_hex"])
+        if (not isinstance(value, dict)
+                or set(value) != {"sig_alg", "private_key_hex", "public_key_hex"}
+                or value.get("sig_alg") != SIG_ALG
+                or not isinstance(value.get("private_key_hex"), str)
+                or not isinstance(value.get("public_key_hex"), str)):
+            raise RuntimeError("Invalid validator signing key file schema or algorithm")
+        try:
+            private, public = bytes.fromhex(value["private_key_hex"]), bytes.fromhex(value["public_key_hex"])
+        except ValueError as exc:
+            raise RuntimeError("Validator signing key file contains invalid hexadecimal") from exc
+        _check_signing_keypair(private, public)
+        return private, public
     with oqs.Signature(SIG_ALG) as signer:
         public = signer.generate_keypair()
         private = signer.export_secret_key()
@@ -105,6 +129,7 @@ def _load_signing_key() -> tuple[bytes, bytes]:
         os.chmod(path, 0o600)
     except OSError:
         pass
+    _check_signing_keypair(private, public)
     return private, public
 
 
