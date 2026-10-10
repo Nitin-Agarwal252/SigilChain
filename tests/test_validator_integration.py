@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from pydantic import ValidationError
 import httpx
 import oqs
@@ -21,6 +22,25 @@ from sigilchain.ledger import LedgerUnavailable, get_event
 
 
 class EtcdIntegrationTests(unittest.TestCase):
+    def test_api_authentication_fails_closed_without_configured_key(self):
+        validator = importlib.import_module("sigilchain.validator")
+        with patch.object(config, "API_KEY", ""):
+            with self.assertRaises(HTTPException) as missing:
+                validator._auth(None)
+        self.assertEqual(missing.exception.status_code, 503)
+
+        with patch.object(config, "API_KEY", "s" * 31):
+            with self.assertRaises(HTTPException) as short:
+                validator._auth("s" * 31)
+        self.assertEqual(short.exception.status_code, 503)
+
+        configured_key = "k" * 32
+        with patch.object(config, "API_KEY", configured_key):
+            validator._auth(configured_key)
+            with self.assertRaises(HTTPException) as rejected:
+                validator._auth("wrong-key")
+        self.assertEqual(rejected.exception.status_code, 401)
+
     def test_validator_signing_pair_check_rejects_mismatch(self):
         validator = importlib.import_module("sigilchain.validator")
         with oqs.Signature(SIG_ALG) as first_signer:
@@ -28,6 +48,7 @@ class EtcdIntegrationTests(unittest.TestCase):
             first_private = first_signer.export_secret_key()
         with oqs.Signature(SIG_ALG) as second_signer:
             second_public = second_signer.generate_keypair()
+            second_private = second_signer.export_secret_key()
         validator._check_signing_keypair(first_private, first_public)
         with self.assertRaisesRegex(RuntimeError, "does not match"):
             validator._check_signing_keypair(first_private, second_public)
@@ -38,6 +59,9 @@ class EtcdIntegrationTests(unittest.TestCase):
             self.assertEqual(stored["sig_alg"], SIG_ALG)
             self.assertEqual(bytes.fromhex(stored["private_key_hex"]), first_private)
             self.assertEqual(bytes.fromhex(stored["public_key_hex"]), first_public)
+            with self.assertRaises(FileExistsError):
+                validator._persist_signing_key(path, second_private, second_public)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), stored)
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertEqual(list(path.parent.glob(".validator.json.*.tmp")), [])

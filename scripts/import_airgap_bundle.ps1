@@ -1,5 +1,9 @@
 $ErrorActionPreference = "Stop"
 $bundle = (Resolve-Path $PSScriptRoot).Path
+if ([string]::IsNullOrWhiteSpace($env:SIGILCHAIN_API_KEY) -or
+    [Text.Encoding]::UTF8.GetByteCount($env:SIGILCHAIN_API_KEY) -lt 32) {
+    throw "Set SIGILCHAIN_API_KEY to a secret of at least 32 bytes before importing and starting SigilChain."
+}
 $checksumFile = Join-Path $bundle "SHA256SUMS"
 if (-not (Test-Path -LiteralPath $checksumFile)) { throw "Bundle is incomplete: SHA256SUMS is missing" }
 $bundleFiles = @("sigilchain-images.tar", "docker-compose.yml", "import_airgap_bundle.ps1", "README-airgap.txt")

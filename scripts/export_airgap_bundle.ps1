@@ -23,6 +23,9 @@ try {
 SigilChain air-gap bundle. The bundle does not include private keys, local databases,
 recipient packages, source documents, or validator trust pins.
 
+Before running the importer, set SIGILCHAIN_API_KEY to a random secret of at least 32 bytes
+in the isolated host's shell. It must match the key configured for authorized clients.
+
 1. Verify and load images by running .\import_airgap_bundle.ps1 on the isolated host.
 2. Start the stack only from imported images (the importer uses --no-build --pull never).
 3. Confirm validator fingerprints over an independent trusted channel, then pin them.

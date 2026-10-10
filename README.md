@@ -17,13 +17,20 @@ original separately when needed.
 
 ## Quick start
 
-1. Build images on a connected staging machine: `docker compose --profile tools build`.
-2. Start validators and console: `docker compose --profile local-ui up -d --no-build --pull never`.
-3. Pin validator fingerprints after out-of-band checks: `docker compose --profile tools run --rm cli python scripts/pin_validators.py --out /data/trust/validator_trust.json`.
-4. Enroll each recipient: `docker compose --profile tools run --rm cli python -m sigilchain.cli enroll --as alice`.
-5. Put source files under `./cli-data`, then encrypt: `docker compose --profile tools run --rm cli python -m sigilchain.cli encrypt --input /data/source.docx --recipients alice,bob --out /data/package.json`.
-6. Decrypt as the recipient: `docker compose --profile tools run --rm cli python -m sigilchain.cli decrypt --package /data/package.json --as alice --doc-id memo-001`.
-7. Upload the marked PDF or a page image to `http://127.0.0.1:8501` and download its JSON evidence bundle.
+1. Set a fresh API key of at least 32 bytes in the shell used for every Compose command. In PowerShell:
+
+   ```powershell
+   $env:SIGILCHAIN_API_KEY = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+   ```
+
+   Keep this secret out of Git and share it only with authorized offline clients.
+2. Build images on a connected staging machine: `docker compose --profile tools build`.
+3. Start validators and console: `docker compose --profile local-ui up -d --no-build --pull never`.
+4. Pin validator fingerprints after out-of-band checks: `docker compose --profile tools run --rm cli python scripts/pin_validators.py --out /data/trust/validator_trust.json`.
+5. Enroll each recipient: `docker compose --profile tools run --rm cli python -m sigilchain.cli enroll --as alice`.
+6. Put source files under `./cli-data`, then encrypt: `docker compose --profile tools run --rm cli python -m sigilchain.cli encrypt --input /data/source.docx --recipients alice,bob --out /data/package.json`.
+7. Decrypt as the recipient: `docker compose --profile tools run --rm cli python -m sigilchain.cli decrypt --package /data/package.json --as alice --doc-id memo-001`.
+8. Upload the marked PDF or a page image to `http://127.0.0.1:8501` and download its JSON evidence bundle.
 
 The recipient CLI stores local private keys under `./cli-data/local_keys`; keep
 that directory on the recipient's device. Never put private keys, passphrases,
@@ -39,6 +46,7 @@ frames and 120 million grayscale raster pixels per document to limit memory use.
 - Three etcd members use Raft ordering. A write needs two members; the system also requires two distinct signed validator receipts. Raft tolerates crash/unavailable members, not Byzantine behavior.
 - The Compose demo runs all members on one Docker host. It is a shared failure domain and does not meet a strong “no single administrator can alter anything” guarantee against a host administrator. For stronger deployment, separate validators and protect signing keys on independent hosts/hardware.
 - The trace console requires pinned validator keys and a configured quorum. Missing keys, invalid signatures, broken proofs, or insufficient receipts are inconclusive/fail closed.
+- Validator APIs require the same operator-managed 32-byte-minimum `SIGILCHAIN_API_KEY` across clients and validator containers; missing configuration fails closed. The key is shared through the offline environment, not a cloud KMS.
 - Watermarks use repeated DCT carriers and Reed–Solomon coding. The optional Haar DWT + DCT mode is experimental. Photo correction is experimental; no camera-capture resistance is claimed without tests on that exact transformation.
 
 ## Offline transfer

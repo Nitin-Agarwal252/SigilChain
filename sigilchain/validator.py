@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import tempfile
@@ -100,7 +101,7 @@ def _check_signing_keypair(private_key: bytes, public_key: bytes) -> None:
 
 
 def _persist_signing_key(path: Path, private_key: bytes, public_key: bytes) -> None:
-    """Publish the key file atomically with owner-only permissions on POSIX."""
+    """Publish without overwriting an existing key, atomically and privately."""
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -114,7 +115,10 @@ def _persist_signing_key(path: Path, private_key: bytes, public_key: bytes) -> N
             os.fsync(handle.fileno())
         if os.name != "nt":
             os.chmod(temporary_path, 0o600)
-        os.replace(temporary_path, path)
+        # A hard link publishes the complete inode atomically and fails if a
+        # competing process has already created the destination.
+        os.link(temporary_path, path)
+        temporary_path.unlink()
         if os.name != "nt":
             directory_fd = os.open(path.parent, os.O_RDONLY)
             try:
@@ -128,7 +132,12 @@ def _persist_signing_key(path: Path, private_key: bytes, public_key: bytes) -> N
 
 
 def _auth(value: str | None = Header(default=None, alias=config.API_KEY_HEADER)) -> None:
-    if config.API_KEY and value != config.API_KEY:
+    expected = config.API_KEY
+    if len(expected.encode("utf-8")) < 32:
+        raise HTTPException(status_code=503,
+                            detail="Validator API key is not configured with at least 32 bytes.")
+    supplied = value.encode("utf-8") if isinstance(value, str) else b""
+    if not hmac.compare_digest(supplied, expected.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
