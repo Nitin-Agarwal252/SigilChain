@@ -5,6 +5,8 @@ import hashlib
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +14,7 @@ import oqs
 
 from sigilchain import config
 from sigilchain.events import build_claim, canonical_json, sign_claim
-from sigilchain.evidence import make_bundle, verify_bundle
+from sigilchain.evidence import main as evidence_main, make_bundle, verify_bundle
 from sigilchain.identity import enroll, load_private
 from sigilchain.ledger import GENESIS
 from sigilchain.quorum import SIG_ALG
@@ -62,6 +64,18 @@ class EvidenceTests(unittest.TestCase):
                     bundle = make_bundle(claim["watermark_id"], matches, 0.99, "unit test")
                     ok, errors = verify_bundle(bundle, identity_db, str(trust_path))
                     self.assertTrue(ok, errors)
+                    bundle_path = root / "evidence.json"
+                    bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+                    output = StringIO()
+                    with patch.object(config, "QUORUM_REQUIRED", 2), redirect_stdout(output):
+                        self.assertEqual(evidence_main([str(bundle_path), "--identity-db", identity_db,
+                                                       "--validator-trust", str(trust_path)]), 0)
+                    self.assertIn("Evidence verified", output.getvalue())
+                    output = StringIO()
+                    with patch.object(config, "QUORUM_REQUIRED", 2), redirect_stdout(output):
+                        self.assertEqual(evidence_main([str(bundle_path), "--identity-db", identity_db,
+                            "--validator-trust", str(trust_path), "--required-quorum", "3"]), 1)
+                    self.assertIn("3 required", output.getvalue())
                     tampered = json.loads(json.dumps(bundle))
                     tampered["validator_evidence"][0]["receipt"]["entry_hash"] = "0" * 64
                     ok, _ = verify_bundle(tampered, identity_db, str(trust_path))

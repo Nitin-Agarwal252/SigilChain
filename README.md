@@ -64,4 +64,6 @@ portable evidence verifier is `python -m sigilchain.evidence path\bundle.json`
 and requires a trusted identity registry and pinned validator roster for a
 meaningful offline identity check. For the Compose network, run it in the CLI
 container with `--identity-db /data/shared/identity_registry.db` and
-`--validator-trust /data/trust/validator_trust.json`.
+`--validator-trust /data/trust/validator_trust.json`. Operators can require a
+higher receipt count with `--required-quorum 3`; this setting can raise but
+cannot lower the verifier's local minimum.

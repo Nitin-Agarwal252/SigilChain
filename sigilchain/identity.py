@@ -91,6 +91,27 @@ def _new_key_record(recipient_id: str, version: int) -> tuple[dict[str, Any], di
 
 
 def register_public(public: dict[str, Any], db_path: str | None = None) -> None:
+    expected_fields = {"recipient_id", "key_version", "kem_alg", "sig_alg", "kem_public", "sig_public"}
+    if not isinstance(public, dict) or set(public) != expected_fields:
+        raise ValueError("Public identity must contain exactly the six supported public fields.")
+    try:
+        _validate_id(public["recipient_id"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Public identity has an invalid recipient ID.") from exc
+    if type(public["key_version"]) is not int or public["key_version"] < 1:
+        raise ValueError("Public identity key version must be a positive integer.")
+    if public["kem_alg"] != KEM_ALG or public["sig_alg"] != SIG_ALG:
+        raise ValueError("Public identity must use ML-KEM-768 and ML-DSA-65.")
+    with oqs.KeyEncapsulation(KEM_ALG) as kem, oqs.Signature(SIG_ALG) as signature:
+        expected_lengths = {
+            "kem_public": kem.details["length_public_key"],
+            "sig_public": signature.details["length_public_key"],
+        }
+    for field, expected_length in expected_lengths.items():
+        value = public[field]
+        if (not isinstance(value, str) or not re.fullmatch(r"(?:[0-9a-f]{2})+", value)
+                or len(value) != expected_length * 2):
+            raise ValueError(f"Public identity {field} must be {expected_length} bytes of lowercase hexadecimal data.")
     conn = _connect(db_path)
     try:
         conn.execute("INSERT INTO identities VALUES (?,?,?,?,?,?,strftime('%s','now'),NULL)",

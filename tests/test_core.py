@@ -16,7 +16,7 @@ from sigilchain import config, ledger
 from sigilchain.crypto import decrypt_pdf, encrypt_pdf
 from sigilchain.documents import DocumentError, normalize
 from sigilchain.events import build_claim, sign_claim, verify_claim
-from sigilchain.identity import enroll, load_private, lookup_identity, rotate, revoke
+from sigilchain.identity import enroll, load_private, lookup_identity, register_public, rotate, revoke
 from sigilchain.quorum import _effective_quorum, submit_to_quorum
 from sigilchain.watermark import embed_page, extract_page, new_watermark_id
 
@@ -65,6 +65,21 @@ class IdentityAndCryptoTests(unittest.TestCase):
         self.assertEqual(lookup_identity("alice", self.db, key_version=1, allow_revoked=True)["sig_public"], first["sig_public"])
         revoke("alice", self.db)
         self.assertIsNone(lookup_identity("alice", self.db))
+
+    def test_public_identity_import_rejects_malformed_key_material(self):
+        public = enroll("alice", "correct horse battery", self.db)
+        invalid_records = (
+            dict(public, recipient_id="../alice"),
+            dict(public, key_version=True),
+            dict(public, sig_public="00"),
+            dict(public, kem_public="zz" * 1184),
+            {**public, "private_key": "must-not-be-imported"},
+        )
+        for record in invalid_records:
+            with self.subTest(record=record):
+                with self.assertRaises(ValueError):
+                    register_public(record, self.db)
+        self.assertIsNone(lookup_identity("../alice", self.db, allow_revoked=True))
 
 
 class DocumentTests(unittest.TestCase):

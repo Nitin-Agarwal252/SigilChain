@@ -132,13 +132,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("bundle")
     parser.add_argument("--identity-db")
     parser.add_argument("--validator-trust")
+    parser.add_argument("--required-quorum", type=int,
+                        help="Require at least this many distinct pinned validator receipts")
     args = parser.parse_args(argv)
     try:
         bundle = json.loads(Path(args.bundle).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"Could not read evidence bundle: {exc}")
         return 2
-    ok, errors = verify_bundle(bundle, args.identity_db, args.validator_trust)
+    ok, errors = verify_bundle(bundle, args.identity_db, args.validator_trust,
+                               required_quorum=args.required_quorum)
     if ok:
         print("Evidence verified: recipient claim signature, pinned validator receipts, and chain proofs pass.")
         print("This verifies a key-signed session claim; it does not identify the physical distributor of a leak.")
