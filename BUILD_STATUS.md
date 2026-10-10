@@ -24,7 +24,8 @@ feature is not marked verified until its check has been run successfully.
 - [x] Commit to three-member etcd/Raft ordering and require 2-of-3 distinct ML-DSA validator receipts; independently verify hash-chain proofs and pinned keys.
 - [x] Trace PDF and image uploads page by page; export JSON evidence; fail closed on malformed, tampered, untrusted, or sub-quorum evidence.
 - [x] Start an imported bundle offline without package/image pulls; bind the local console to loopback by default.
-- [ ] Run service, end-to-end, and full air-gap checks and record actual results below.
+- [x] Run unit and service-outage checks, plus an end-to-end encrypt/decrypt/watermark/quorum/trace/evidence round trip.
+- [ ] Validate transfer/import on a separate physically isolated host with pulls disabled.
 
 ## Completed
 
@@ -33,16 +34,20 @@ feature is not marked verified until its check has been run successfully.
 
 ## Incomplete
 
-- Service-level, end-to-end, and full air-gap acceptance checks remain.
+- Full air-gap transfer/import validation remains.
 
 ## Verified
 
 - Python syntax compilation, Docker Compose configuration validation, and whitespace checks pass.
 - Docker images build for both app and CLI targets using matching liboqs 0.16.0 and liboqs-python 0.16.0.1.
 - Container unit acceptance suite passes: 13 tests covering ML-KEM/ML-DSA flows, identity/key lifecycle, file normalization, DCT/DWT-DCT watermark round trips, JPEG recompression, evidence tampering, hash-chain tampering, and fail-closed ledger outages.
+- Container end-to-end acceptance test passes against the live Compose validators and etcd cluster: enroll identity, encrypt, decrypt, mark, collect quorum receipts, extract watermark, and verify portable evidence bundle.
+- Same-host offline-import simulation passes: exported all required images, rejected a modified README before image loading, then loaded the clean archive and started Compose with `--no-build --pull never`; validator health returned 200 using the etcd-Raft backend.
 
 ## Known limitations
 
 - Any successful match attributes a leaked copy to a signed session claim; it does not prove who physically distributed the copy or provide a trusted timestamp.
 - etcd/Raft is crash-fault consensus. Three containers on one Docker host share a failure domain.
 - Watermark robustness claims will be limited to transformations actually exercised in the tests.
+- SHA-256 bundle checks detect accidental or uncoordinated file changes; the bundle manifest is not signed, so it does not authenticate the exporter against an attacker who can replace both files and checksums.
+- The offline import was tested on the connected development host, not on a separate physically isolated machine.

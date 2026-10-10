@@ -32,7 +32,11 @@ The three-member etcd/Raft group tolerates one unavailable member, not a malicio
 majority. It is crash-fault consensus, not Byzantine consensus. All Compose members
 share one host failure domain. Event times are local clock claims.
 "@ | Set-Content -Encoding UTF8 (Join-Path $output "README-airgap.txt")
-    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-    "$hash  sigilchain-images.tar" | Set-Content -Encoding ASCII (Join-Path $output "SHA256SUMS")
+    $bundleFiles = @("sigilchain-images.tar", "docker-compose.yml", "import_airgap_bundle.ps1", "README-airgap.txt")
+    $checksums = foreach ($file in $bundleFiles) {
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $output $file)).Hash.ToLowerInvariant()
+        "$hash  $file"
+    }
+    $checksums | Set-Content -Encoding ASCII (Join-Path $output "SHA256SUMS")
     Write-Host "Exported air-gap bundle to $output"
 } finally { Pop-Location }
