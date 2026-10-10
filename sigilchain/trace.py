@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from numbers import Real
 from io import BytesIO
 
 import numpy as np
@@ -72,13 +73,15 @@ def image_pages(data: bytes, filename: str) -> list[np.ndarray]:
 
 def trace_page(page: np.ndarray, nodes: list[str] | None = None,
                threshold: float = 0.72) -> dict:
+    if isinstance(threshold, bool) or not isinstance(threshold, Real) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
+        raise ValueError("Watermark confidence threshold must be a finite number between 0 and 1.")
     try:
         watermark_id, confidence = extract_page(page)
     except Exception as exc:
         return {"status": "extraction_failed", "error": str(exc)}
     if confidence < threshold:
         return {"status": "inconclusive", "watermark_id": watermark_id.hex(), "confidence": confidence}
-    matches = check_watermark(nodes or config.NODE_URLS, watermark_id.hex())
+    matches = check_watermark(config.NODE_URLS if nodes is None else nodes, watermark_id.hex())
     if not matches:
         return {"status": "unverified", "watermark_id": watermark_id.hex(), "confidence": confidence,
                 "reason": "No configured quorum of valid pinned validator receipts and chain proofs."}

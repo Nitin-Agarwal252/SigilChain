@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from . import config, ledger
-from .events import verify_claim
+from .events import is_well_formed_claim, verify_claim
 from .identity import SIG_ALG, lookup_identity
 
 app = FastAPI(title="SigilChain Validator", version="1")
@@ -93,6 +93,8 @@ def identity(recipient_id: str, key_version: int | None = Query(default=None),
 @app.post("/submit")
 def submit(request: SubmitRequest, _: None = Depends(_auth)) -> dict:
     claim = request.claim
+    if not is_well_formed_claim(claim):
+        raise HTTPException(400, "Malformed decryption claim.")
     if claim.get("watermark_id") != request.watermark_id:
         raise HTTPException(400, "Watermark does not match the signed claim")
     public = lookup_identity(claim.get("recipient_id", ""), key_version=claim.get("key_version"))

@@ -43,41 +43,33 @@ def sign_claim(claim: dict[str, Any], private_key_hex: str) -> str:
         return signer.sign(canonical_json(claim)).hex()
 
 
+def is_well_formed_claim(claim: Any) -> bool:
+    """Check v1 claim shape and value types before identity or ledger access."""
+    if not isinstance(claim, dict) or set(claim) != {
+        "schema", "document_id", "recipient_id", "key_version",
+        "watermark_id", "timestamp_claim", "marked_file_sha256",
+    }:
+        return False
+    return (
+        claim["schema"] == "sigilchain-decrypt-claim-v1"
+        and isinstance(claim["document_id"], str)
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", claim["document_id"]) is not None
+        and isinstance(claim["recipient_id"], str)
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", claim["recipient_id"]) is not None
+        and type(claim["key_version"]) is int and claim["key_version"] >= 1
+        and type(claim["timestamp_claim"]) is int and claim["timestamp_claim"] >= 1
+        and isinstance(claim["watermark_id"], str)
+        and re.fullmatch(r"[0-9a-f]{24}", claim["watermark_id"]) is not None
+        and isinstance(claim["marked_file_sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", claim["marked_file_sha256"]) is not None
+    )
+
+
 def verify_claim(claim: dict[str, Any], signature_hex: str,
                  public_key_hex: str, sig_alg: str = SIG_ALG) -> bool:
-    if sig_alg != SIG_ALG:
+    if sig_alg != SIG_ALG or not is_well_formed_claim(claim):
         return False
     try:
-        # Keep the signed v1 record deliberately narrow.  In addition to
-        # verifying its signature, reject malformed or ambiguous values before
-        # they reach the ledger or an evidence renderer.
-        if not isinstance(claim, dict) or set(claim) != {
-            "schema", "document_id", "recipient_id", "key_version",
-            "watermark_id", "timestamp_claim", "marked_file_sha256",
-        }:
-            return False
-        if claim["schema"] != "sigilchain-decrypt-claim-v1":
-            return False
-        if not isinstance(claim["document_id"], str) or not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", claim["document_id"]
-        ):
-            return False
-        if not isinstance(claim["recipient_id"], str) or not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", claim["recipient_id"]
-        ):
-            return False
-        if type(claim["key_version"]) is not int or claim["key_version"] < 1:
-            return False
-        if type(claim["timestamp_claim"]) is not int or claim["timestamp_claim"] < 1:
-            return False
-        if not isinstance(claim["watermark_id"], str) or not re.fullmatch(
-            r"[0-9a-f]{24}", claim["watermark_id"]
-        ):
-            return False
-        if not isinstance(claim["marked_file_sha256"], str) or not re.fullmatch(
-            r"[0-9a-f]{64}", claim["marked_file_sha256"]
-        ):
-            return False
         if not isinstance(signature_hex, str) or not re.fullmatch(r"(?:[0-9a-f]{2})+", signature_hex):
             return False
         if not isinstance(public_key_hex, str) or not re.fullmatch(r"(?:[0-9a-f]{2})+", public_key_hex):
