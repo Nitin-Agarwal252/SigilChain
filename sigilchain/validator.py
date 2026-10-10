@@ -4,14 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Literal
 
 import oqs
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt, StrictStr
 
 from . import config, ledger
 from .events import is_well_formed_claim, verify_claim
@@ -48,11 +47,25 @@ def _load_signing_key() -> tuple[bytes, bytes]:
 VALIDATOR_SECRET, VALIDATOR_PUBLIC = _load_signing_key()
 
 
+class DecryptionClaimRequest(BaseModel):
+    """Bounded v1 claim shape; semantic checks remain in events.py."""
+    claim_schema: Literal["sigilchain-decrypt-claim-v1"] = Field(alias="schema")
+    document_id: StrictStr = Field(min_length=1, max_length=64)
+    recipient_id: StrictStr = Field(min_length=1, max_length=64)
+    key_version: StrictInt = Field(ge=1)
+    watermark_id: StrictStr = Field(min_length=24, max_length=24)
+    timestamp_claim: StrictInt = Field(ge=1)
+    marked_file_sha256: StrictStr = Field(min_length=64, max_length=64)
+
+    class Config:
+        extra = "forbid"
+
+
 class SubmitRequest(BaseModel):
-    watermark_id: str = Field(min_length=24, max_length=24)
-    claim: dict[str, Any]
+    watermark_id: StrictStr = Field(min_length=24, max_length=24)
+    claim: DecryptionClaimRequest
     # ML-DSA-65 signatures are 3309 bytes (6618 hexadecimal characters).
-    signature_hex: str = Field(min_length=6618, max_length=6618)
+    signature_hex: StrictStr = Field(min_length=6618, max_length=6618)
 
 
 def _sign_receipt(entry: dict) -> dict:
@@ -93,7 +106,9 @@ def identity(recipient_id: str, key_version: int | None = Query(default=None),
 
 @app.post("/submit")
 def submit(request: SubmitRequest, _: None = Depends(_auth)) -> dict:
-    claim = request.claim
+    # Use an ordinary mapping for canonical signing and persistence. The
+    # semantic validator below also enforces safe IDs and lowercase hex.
+    claim = request.claim.dict(by_alias=True)
     if not is_well_formed_claim(claim):
         raise HTTPException(400, "Malformed decryption claim.")
     if claim.get("watermark_id") != request.watermark_id:

@@ -7,7 +7,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from fastapi import HTTPException
 from pydantic import ValidationError
 
 from sigilchain import config
@@ -20,20 +19,35 @@ class EtcdIntegrationTests(unittest.TestCase):
             with self.assertRaises(LedgerUnavailable):
                 get_event("not-present")
 
-    def test_submit_rejects_malformed_claim_before_identity_lookup(self):
+    def test_submit_request_rejects_malformed_claim_during_parsing(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
             config, "VALIDATOR_KEY_PATH", str(Path(directory) / "validator.json")
         ):
             validator = importlib.import_module("sigilchain.validator")
-            request = validator.SubmitRequest(
-                watermark_id="ab" * 12,
-                claim={"schema": "sigilchain-decrypt-claim-v1", "recipient_id": []},
-                signature_hex="00" * 3309,
-            )
             with patch.object(validator, "lookup_identity") as lookup:
-                with self.assertRaises(HTTPException) as raised:
-                    validator.submit(request, None)
-            self.assertEqual(raised.exception.status_code, 400)
+                valid_claim = {
+                    "schema": "sigilchain-decrypt-claim-v1",
+                    "document_id": "doc-1",
+                    "recipient_id": "recipient-1",
+                    "key_version": 1,
+                    "watermark_id": "ab" * 12,
+                    "timestamp_claim": 1,
+                    "marked_file_sha256": "cd" * 32,
+                }
+                invalid_claims = [
+                    {"schema": "sigilchain-decrypt-claim-v1", "recipient_id": []},
+                    dict(valid_claim, unexpected="field"),
+                    dict(valid_claim, key_version=True),
+                    dict(valid_claim, document_id="x" * 65),
+                ]
+                for claim in invalid_claims:
+                    with self.subTest(claim=claim):
+                        with self.assertRaises(ValidationError):
+                            validator.SubmitRequest(
+                                watermark_id="ab" * 12,
+                                claim=claim,
+                                signature_hex="00" * 3309,
+                            )
             lookup.assert_not_called()
             with self.assertRaises(ValidationError):
                 validator.SubmitRequest(watermark_id="short", claim={}, signature_hex="00")
