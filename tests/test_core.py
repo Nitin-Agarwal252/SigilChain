@@ -136,6 +136,14 @@ class WatermarkTests(unittest.TestCase):
                 self.assertFalse(verify_claim(malformed, malformed_signature, public["sig_public"]))
                 with self.assertRaises(ValueError):
                     build_claim("memo", "signer", 1, "ab" * 16, b"marked", timestamp=100)
+                for invalid_args in (
+                    ("memo", "../signer", 1, "ab" * 12, b"marked", 100),
+                    ("memo", "signer", True, "ab" * 12, b"marked", 100),
+                    ("memo", "signer", 1, "ab" * 12, b"marked", 0),
+                ):
+                    with self.subTest(invalid_args=invalid_args):
+                        with self.assertRaises(ValueError):
+                            build_claim(*invalid_args[:5], timestamp=invalid_args[5])
             finally:
                 config.KEYS_DIR = previous
 

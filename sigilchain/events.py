@@ -18,13 +18,23 @@ def canonical_json(value: dict[str, Any]) -> bytes:
 
 def build_claim(document_id: str, recipient_id: str, key_version: int,
                 watermark_id: str, marked_pdf: bytes, timestamp: int | None = None) -> dict[str, Any]:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", document_id):
+    id_pattern = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+    if not isinstance(document_id, str) or not re.fullmatch(id_pattern, document_id):
         raise ValueError("Document IDs must be 1-64 letters, digits, dot, underscore, or hyphen.")
-    if not re.fullmatch(r"[0-9a-f]{24}", watermark_id):
+    if not isinstance(recipient_id, str) or not re.fullmatch(id_pattern, recipient_id):
+        raise ValueError("Recipient IDs must be 1-64 letters, digits, dot, underscore, or hyphen.")
+    if type(key_version) is not int or key_version < 1:
+        raise ValueError("Key version must be a positive integer.")
+    if not isinstance(watermark_id, str) or not re.fullmatch(r"[0-9a-f]{24}", watermark_id):
         raise ValueError("Watermark IDs must be 24 lowercase hexadecimal characters.")
+    if not isinstance(marked_pdf, bytes):
+        raise ValueError("Marked document content must be bytes.")
+    claimed_at = int(time.time()) if timestamp is None else timestamp
+    if type(claimed_at) is not int or claimed_at < 1:
+        raise ValueError("Claim timestamp must be a positive integer.")
     return {"schema": "sigilchain-decrypt-claim-v1", "document_id": document_id,
             "recipient_id": recipient_id, "key_version": key_version,
-            "watermark_id": watermark_id, "timestamp_claim": int(timestamp or time.time()),
+            "watermark_id": watermark_id, "timestamp_claim": claimed_at,
             "marked_file_sha256": hashlib.sha256(marked_pdf).hexdigest()}
 
 
