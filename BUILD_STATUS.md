@@ -43,6 +43,8 @@ feature is not marked verified until its check has been run successfully.
 - Container unit acceptance suite passes: 13 tests covering ML-KEM/ML-DSA flows, identity/key lifecycle, file normalization, DCT/DWT-DCT watermark round trips, JPEG recompression, evidence tampering, hash-chain tampering, and fail-closed ledger outages.
 - Container end-to-end acceptance test passes against the live Compose validators and etcd cluster: enroll identity, encrypt, decrypt, mark, collect quorum receipts, extract watermark, and verify portable evidence bundle.
 - Evidence verification uses the greater of local policy, bundle-declared quorum, and any explicit operator override; a bundle cannot lower the verifier's local minimum. Regression test passes for both metadata and explicit-argument downgrade attempts.
+- Validator submission and watermark lookup also enforce at least the local configured quorum; zero or invalid quorum requests fail closed.
+- Malformed evidence structures (wrong top-level, claim, identity, evidence-list, and ledger-entry types) fail closed with verification errors rather than crashing the verifier.
 - Same-host offline-import simulation passes: exported all required images, rejected a modified README before image loading, then loaded the clean archive and started Compose with `--no-build --pull never`; validator health returned 200 using the etcd-Raft backend.
 
 ## Known limitations

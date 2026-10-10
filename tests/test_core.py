@@ -17,7 +17,7 @@ from sigilchain.crypto import decrypt_pdf, encrypt_pdf
 from sigilchain.documents import DocumentError, normalize
 from sigilchain.events import build_claim, sign_claim, verify_claim
 from sigilchain.identity import enroll, load_private, lookup_identity, rotate, revoke
-from sigilchain.quorum import submit_to_quorum
+from sigilchain.quorum import _effective_quorum, submit_to_quorum
 from sigilchain.watermark import embed_page, extract_page, new_watermark_id
 
 
@@ -154,6 +154,18 @@ class LocalLedgerTests(unittest.TestCase):
         self.assertFalse(result["committed"])
         self.assertEqual(result["accepted_by"], [])
         self.assertEqual(len(result["unreachable"]), 1)
+
+    def test_requested_quorum_cannot_weaken_local_policy(self):
+        with patch.object(config, "QUORUM_REQUIRED", 3):
+            self.assertEqual(_effective_quorum(None), 3)
+            self.assertEqual(_effective_quorum(1), 3)
+            self.assertEqual(_effective_quorum(4), 4)
+            with self.assertRaises(ValueError):
+                _effective_quorum(0)
+            result = submit_to_quorum([], {"watermark_id": "policy-test"}, "00",
+                                      required=1, pins={})
+            self.assertEqual(result["required_quorum"], 3)
+            self.assertFalse(result["committed"])
 
 
 if __name__ == "__main__":

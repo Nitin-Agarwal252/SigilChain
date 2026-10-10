@@ -40,21 +40,34 @@ def make_bundle(watermark_id: str, matches: list[dict], confidence: float,
 def verify_bundle(bundle: dict[str, Any], identity_db: str | None = None,
                   validator_trust: str | None = None, required_quorum: int | None = None) -> tuple[bool, list[str]]:
     errors: list[str] = []
-    try:
-        claim = bundle["claim"]
-        watermark_id = bundle["extracted_watermark_id"]
-        recipient = bundle["recipient_public_identity"]
-        signature = bundle["recipient_signature_hex"]
-    except (KeyError, TypeError) as exc:
-        return False, [f"Malformed evidence bundle: {exc}"]
+    if not isinstance(bundle, dict):
+        return False, ["Malformed evidence bundle: top-level value must be an object."]
+    claim = bundle.get("claim")
+    watermark_id = bundle.get("extracted_watermark_id")
+    recipient = bundle.get("recipient_public_identity")
+    signature = bundle.get("recipient_signature_hex")
+    if not isinstance(claim, dict):
+        return False, ["Malformed evidence bundle: claim must be an object."]
+    if not isinstance(recipient, dict):
+        return False, ["Malformed evidence bundle: recipient identity must be an object."]
+    if not isinstance(watermark_id, str) or not isinstance(signature, str):
+        return False, ["Malformed evidence bundle: watermark ID and signature must be strings."]
     canonical = canonical_json(claim)
+    evidence_items = bundle.get("validator_evidence", [])
+    if not isinstance(evidence_items, list):
+        errors.append("Malformed evidence bundle: validator_evidence must be an array.")
+        evidence_items = []
     if bundle.get("format") != "sigilchain-evidence-v1":
         errors.append("Unsupported evidence bundle format.")
     if claim.get("watermark_id") != watermark_id:
         errors.append("Extracted watermark ID differs from the signed claim.")
-    if any(item.get("entry", {}).get("watermark_id") != watermark_id
-           for item in bundle.get("validator_evidence", []) if isinstance(item, dict)):
-        errors.append("A validator ledger entry watermark ID differs from the extracted mark.")
+    for item in evidence_items:
+        if not isinstance(item, dict):
+            errors.append("Malformed validator evidence item.")
+            continue
+        entry = item.get("entry")
+        if not isinstance(entry, dict) or entry.get("watermark_id") != watermark_id:
+            errors.append("A validator ledger entry watermark ID differs from the extracted mark.")
     if bundle.get("canonical_claim_hex") != canonical.hex():
         errors.append("Canonical claim bytes do not match the claim object.")
     if recipient.get("recipient_id") != claim.get("recipient_id"):
@@ -76,13 +89,17 @@ def verify_bundle(bundle: dict[str, Any], identity_db: str | None = None,
         pins = {}
     valid: set[str] = set()
     seen: set[str] = set()
-    for item in bundle.get("validator_evidence", []):
+    for item in evidence_items:
         try:
+            if not isinstance(item, dict):
+                continue
             validator_id = item["validator_id"]
             if validator_id in seen:
                 continue
             seen.add(validator_id)
             entry, proof = item["entry"], item["proof"]
+            if not isinstance(entry, dict) or not isinstance(proof, list):
+                continue
             if not ledger.verify_chain(proof, watermark_id) or not proof or proof[-1] != entry:
                 continue
             if entry.get("claim_json") != canonical.decode() or entry.get("signature_hex") != signature:
@@ -92,7 +109,7 @@ def verify_bundle(bundle: dict[str, Any], identity_db: str | None = None,
                 "validator_public_key": item["validator_public_key"]}
             if verify_receipt(evidence, watermark_id, entry, pins):
                 valid.add(validator_id)
-        except (KeyError, TypeError, ValueError, IndexError):
+        except (AttributeError, KeyError, TypeError, ValueError, IndexError):
             continue
     try:
         declared_quorum = int(bundle.get("required_quorum", config.QUORUM_REQUIRED))

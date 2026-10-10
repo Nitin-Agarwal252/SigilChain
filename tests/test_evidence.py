@@ -74,6 +74,23 @@ class EvidenceTests(unittest.TestCase):
                     self.assertTrue(any("2 required" in error for error in errors))
                     ok, _ = verify_bundle(downgraded, identity_db, str(trust_path), required_quorum=1)
                     self.assertFalse(ok)
+                    malformed_variants = []
+                    bad_claim = json.loads(json.dumps(bundle))
+                    bad_claim["claim"] = "not-an-object"
+                    malformed_variants.append(bad_claim)
+                    bad_identity = json.loads(json.dumps(bundle))
+                    bad_identity["recipient_public_identity"] = None
+                    malformed_variants.append(bad_identity)
+                    bad_entry = json.loads(json.dumps(bundle))
+                    bad_entry["validator_evidence"][0]["entry"] = None
+                    malformed_variants.append(bad_entry)
+                    bad_evidence_list = json.loads(json.dumps(bundle))
+                    bad_evidence_list["validator_evidence"] = {}
+                    malformed_variants.append(bad_evidence_list)
+                    for malformed in malformed_variants:
+                        ok, errors = verify_bundle(malformed, identity_db, str(trust_path))
+                        self.assertFalse(ok)
+                        self.assertTrue(errors)
             finally:
                 config.KEYS_DIR = previous
 

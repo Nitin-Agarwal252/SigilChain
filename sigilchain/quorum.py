@@ -18,6 +18,17 @@ def _headers() -> dict[str, str]:
     return {config.API_KEY_HEADER: config.API_KEY} if config.API_KEY else {}
 
 
+def _effective_quorum(requested: int | None) -> int:
+    try:
+        policy = int(config.QUORUM_REQUIRED)
+        requested_value = int(requested) if requested is not None else policy
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Validator quorum must be a positive integer.") from exc
+    if policy < 1 or requested_value < 1:
+        raise ValueError("Validator quorum must be a positive integer.")
+    return max(policy, requested_value)
+
+
 def load_pins(path: str | None = None) -> dict[str, Any]:
     roster_path = Path(path or config.VALIDATOR_TRUST)
     try:
@@ -60,7 +71,8 @@ def verify_receipt(evidence: dict, watermark_id: str, entry: dict, pins: dict[st
 
 
 def submit_to_quorum(nodes: list[str], claim: dict, signature_hex: str,
-                     required: int = 2, pins: dict[str, Any] | None = None) -> dict:
+                     required: int | None = None, pins: dict[str, Any] | None = None) -> dict:
+    required = _effective_quorum(required)
     pins = pins if pins is not None else load_pins()
     accepted, rejected, unreachable = [], [], []
     for base in nodes:
@@ -94,8 +106,9 @@ def lookup_remote(base_urls: list[str], recipient_id: str) -> dict | None:
     return None
 
 
-def check_watermark(nodes: list[str], watermark_id: str, required: int = 2,
+def check_watermark(nodes: list[str], watermark_id: str, required: int | None = None,
                     pins: dict[str, Any] | None = None) -> list[dict]:
+    required = _effective_quorum(required)
     pins = pins if pins is not None else load_pins()
     found = []
     for base in nodes:
