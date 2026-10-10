@@ -66,6 +66,14 @@ class EvidenceTests(unittest.TestCase):
                     tampered["validator_evidence"][0]["receipt"]["entry_hash"] = "0" * 64
                     ok, _ = verify_bundle(tampered, identity_db, str(trust_path))
                     self.assertFalse(ok)
+                    downgraded = json.loads(json.dumps(bundle))
+                    downgraded["required_quorum"] = 1
+                    downgraded["validator_evidence"] = downgraded["validator_evidence"][:1]
+                    ok, errors = verify_bundle(downgraded, identity_db, str(trust_path))
+                    self.assertFalse(ok)
+                    self.assertTrue(any("2 required" in error for error in errors))
+                    ok, _ = verify_bundle(downgraded, identity_db, str(trust_path), required_quorum=1)
+                    self.assertFalse(ok)
             finally:
                 config.KEYS_DIR = previous
 

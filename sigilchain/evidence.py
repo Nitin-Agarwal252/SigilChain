@@ -95,10 +95,16 @@ def verify_bundle(bundle: dict[str, Any], identity_db: str | None = None,
         except (KeyError, TypeError, ValueError, IndexError):
             continue
     try:
-        required = required_quorum or int(bundle.get("required_quorum", config.QUORUM_REQUIRED))
+        declared_quorum = int(bundle.get("required_quorum", config.QUORUM_REQUIRED))
+        operator_quorum = int(required_quorum) if required_quorum is not None else config.QUORUM_REQUIRED
+        if declared_quorum < 1 or operator_quorum < 1 or config.QUORUM_REQUIRED < 1:
+            raise ValueError("quorum must be positive")
+        # Bundle metadata may require stricter verification, but cannot weaken
+        # the local operator's configured threshold.
+        required = max(config.QUORUM_REQUIRED, declared_quorum, operator_quorum)
     except (TypeError, ValueError):
-        required = config.QUORUM_REQUIRED
-        errors.append("Evidence quorum value is malformed.")
+        required = max(1, config.QUORUM_REQUIRED)
+        errors.append("Evidence quorum value is malformed or below the local minimum.")
     if len(valid) < required:
         errors.append(f"Only {len(valid)} distinct pinned validator receipts and chain proofs verify; {required} required.")
     return not errors, errors

@@ -42,6 +42,7 @@ feature is not marked verified until its check has been run successfully.
 - Docker images build for both app and CLI targets using matching liboqs 0.16.0 and liboqs-python 0.16.0.1.
 - Container unit acceptance suite passes: 13 tests covering ML-KEM/ML-DSA flows, identity/key lifecycle, file normalization, DCT/DWT-DCT watermark round trips, JPEG recompression, evidence tampering, hash-chain tampering, and fail-closed ledger outages.
 - Container end-to-end acceptance test passes against the live Compose validators and etcd cluster: enroll identity, encrypt, decrypt, mark, collect quorum receipts, extract watermark, and verify portable evidence bundle.
+- Evidence verification uses the greater of local policy, bundle-declared quorum, and any explicit operator override; a bundle cannot lower the verifier's local minimum. Regression test passes for both metadata and explicit-argument downgrade attempts.
 - Same-host offline-import simulation passes: exported all required images, rejected a modified README before image loading, then loaded the clean archive and started Compose with `--no-build --pull never`; validator health returned 200 using the etcd-Raft backend.
 
 ## Known limitations
