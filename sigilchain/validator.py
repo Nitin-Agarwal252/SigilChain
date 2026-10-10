@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Literal
@@ -98,6 +99,34 @@ def _check_signing_keypair(private_key: bytes, public_key: bytes) -> None:
         raise RuntimeError("Validator signing key material is invalid") from exc
 
 
+def _persist_signing_key(path: Path, private_key: bytes, public_key: bytes) -> None:
+    """Publish the key file atomically with owner-only permissions on POSIX."""
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump({"sig_alg": SIG_ALG, "private_key_hex": private_key.hex(),
+                       "public_key_hex": public_key.hex()}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name != "nt":
+            os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+        if os.name != "nt":
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+
+
 def _auth(value: str | None = Header(default=None, alias=config.API_KEY_HEADER)) -> None:
     if config.API_KEY and value != config.API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -123,12 +152,7 @@ def _load_signing_key() -> tuple[bytes, bytes]:
     with oqs.Signature(SIG_ALG) as signer:
         public = signer.generate_keypair()
         private = signer.export_secret_key()
-    path.write_text(json.dumps({"sig_alg": SIG_ALG, "private_key_hex": private.hex(),
-                                "public_key_hex": public.hex()}), encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    _persist_signing_key(path, private, public)
     _check_signing_keypair(private, public)
     return private, public
 

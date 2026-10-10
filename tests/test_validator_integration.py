@@ -4,6 +4,9 @@ from __future__ import annotations
 import unittest
 import importlib
 import asyncio
+import json
+import os
+import stat
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -28,6 +31,16 @@ class EtcdIntegrationTests(unittest.TestCase):
         validator._check_signing_keypair(first_private, first_public)
         with self.assertRaisesRegex(RuntimeError, "does not match"):
             validator._check_signing_keypair(first_private, second_public)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "validator.json"
+            validator._persist_signing_key(path, first_private, first_public)
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["sig_alg"], SIG_ALG)
+            self.assertEqual(bytes.fromhex(stored["private_key_hex"]), first_private)
+            self.assertEqual(bytes.fromhex(stored["public_key_hex"]), first_public)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(list(path.parent.glob(".validator.json.*.tmp")), [])
 
     def test_unavailable_cluster_fails_closed(self):
         with patch.object(config, "ETCD_ENDPOINTS", ["http://127.0.0.1:1"]):

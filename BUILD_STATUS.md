@@ -59,6 +59,7 @@ feature is not marked verified until its check has been run successfully.
 - Validator `/submit` bodies are capped at 16 KiB before JSON/model parsing, including chunked requests; malformed or negative `Content-Length` values are rejected as bad requests.
 - The local SQLite ledger now matches the etcd backend for repeated watermark submissions: identical events are idempotent, while conflicting reuse is rejected without extending the chain.
 - Validator startup now validates the persisted ML-DSA key-file schema and signs/verifies a self-check challenge, failing fast if key material is malformed or the public/private keys do not match.
+- Newly generated validator signing keys are written through a flushed temporary file and atomically replaced into place; POSIX files remain mode 0600, avoiding partially written or broadly readable key files.
 - Malformed evidence structures (wrong top-level, claim, identity, evidence-list, and ledger-entry types) fail closed with verification errors rather than crashing the verifier.
 - Same-host offline-import simulation passes: exported all required images, rejected a modified README before image loading, then loaded the clean archive and started Compose with `--no-build --pull never`; validator health returned 200 using the etcd-Raft backend.
 
