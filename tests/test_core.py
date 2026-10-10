@@ -47,6 +47,17 @@ class IdentityAndCryptoTests(unittest.TestCase):
         tampered["document_ciphertext"] = "00" + tampered["document_ciphertext"][2:]
         with self.assertRaises(ValueError):
             decrypt_pdf(tampered, "alice", alice)
+        malformed_packages = (
+            [],
+            dict(package, document_nonce="not-hex"),
+            dict(package, envelopes=[]),
+            dict(package, envelopes={"alice": []}),
+            dict(package, envelopes={"alice": dict(package["envelopes"]["alice"], kem_ciphertext="00")}),
+        )
+        for malformed in malformed_packages:
+            with self.subTest(package=malformed):
+                with self.assertRaises(ValueError):
+                    decrypt_pdf(malformed, "alice", alice)
         self.assertEqual(lookup_identity("alice", self.db)["sig_public"], alice_pub["sig_public"])
 
     def test_wrong_private_key_rejected(self):
@@ -56,6 +67,20 @@ class IdentityAndCryptoTests(unittest.TestCase):
         package = encrypt_pdf(b"pdf", {"alice": alice_pub})
         with self.assertRaises(ValueError):
             decrypt_pdf(package, "alice", bob)
+
+    def test_encrypt_rejects_malformed_recipient_identity(self):
+        public = enroll("alice", "correct horse battery", self.db)
+        invalid_identities = (
+            ("bob", public),
+            ("alice", dict(public, key_version=True)),
+            ("alice", dict(public, kem_public="00")),
+            ("alice", dict(public, sig_public="zz" * 1952)),
+            ("alice", dict(public, sig_alg="Ed25519")),
+        )
+        for recipient_id, identity in invalid_identities:
+            with self.subTest(recipient_id=recipient_id, identity=identity):
+                with self.assertRaises(ValueError):
+                    encrypt_pdf(b"pdf", {recipient_id: identity})
 
     def test_rotation_revocation_and_old_key_history(self):
         first = enroll("alice", "correct horse battery", self.db)

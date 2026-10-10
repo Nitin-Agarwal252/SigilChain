@@ -40,13 +40,16 @@ feature is not marked verified until its check has been run successfully.
 
 - Python syntax compilation, Docker Compose configuration validation, and whitespace checks pass.
 - Docker images build for both app and CLI targets using matching liboqs 0.16.0 and liboqs-python 0.16.0.1.
-- Container unit acceptance suite passes: 15 tests covering ML-KEM/ML-DSA flows, identity/key lifecycle, file normalization, DCT/DWT-DCT watermark round trips, JPEG recompression, evidence tampering, hash-chain tampering, and fail-closed ledger outages.
+- Container unit acceptance suite passes: 20 tests covering ML-KEM/ML-DSA flows, identity/key lifecycle, file normalization, DCT/DWT-DCT watermark round trips, JPEG recompression, trace upload limits, evidence tampering, hash-chain tampering, and fail-closed ledger outages.
 - Container end-to-end acceptance test passes against the live Compose validators and etcd cluster: enroll identity, encrypt, decrypt, mark, collect quorum receipts, extract watermark, and verify portable evidence bundle.
 - Evidence verification uses the greater of local policy, bundle-declared quorum, and any explicit operator override; a bundle cannot lower the verifier's local minimum. Regression test passes for both metadata and explicit-argument downgrade attempts.
 - Validator submission and watermark lookup also enforce at least the local configured quorum; zero or invalid quorum requests fail closed.
 - Recipient-signed v1 claims require an exact schema, valid recipient/document identifiers, positive integer key version and timestamp, a 12-byte hexadecimal watermark ID, a SHA-256 file digest, and well-formed hexadecimal signature/key material; both claim construction and verification reject malformed values. Regression and end-to-end suites pass.
 - The offline evidence CLI accepts an operator-specified required receipt quorum; it can raise, but cannot lower, local policy.
 - Public identity registration accepts only the exact public-field schema, supported PQC algorithms, safe recipient IDs, positive key versions, and correctly sized library-reported ML-KEM/ML-DSA public keys; malformed imports are rejected before registry writes.
+- Encrypted-package decryption validates the v1 package/envelope schemas, recipient, nonce and ciphertext encodings, and PQC ciphertext size before decapsulation; malformed package structures fail with controlled errors.
+- Document encryption validates each recipient identity's ID, key version, algorithm identifiers, and library-sized ML-KEM/ML-DSA public keys before encapsulating the content key.
+- Trace uploads reject unsupported, empty, or over-50-MiB files and cap processing at 100 pages/frames and 120 million raster pixels per document before rendering; malformed inputs return clear errors.
 - Malformed evidence structures (wrong top-level, claim, identity, evidence-list, and ledger-entry types) fail closed with verification errors rather than crashing the verifier.
 - Same-host offline-import simulation passes: exported all required images, rejected a modified README before image loading, then loaded the clean archive and started Compose with `--no-build --pull never`; validator health returned 200 using the etcd-Raft backend.
 

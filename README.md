@@ -29,6 +29,9 @@ The recipient CLI stores local private keys under `./cli-data/local_keys`; keep
 that directory on the recipient's device. Never put private keys, passphrases,
 databases, packages, or personal demo content in Git.
 
+The trace console accepts files up to 50 MiB and processes at most 100 pages or
+frames and 120 million grayscale raster pixels per document to limit memory use.
+
 ## Security model and operational limits
 
 - ML-KEM-768 (FIPS 203) wraps the AES content key; ML-DSA-65 (FIPS 204) signs recipient event claims and validator receipts.
