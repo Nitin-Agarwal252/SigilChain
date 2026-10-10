@@ -36,6 +36,13 @@ The recipient CLI stores local private keys under `./cli-data/local_keys`; keep
 that directory on the recipient's device. Never put private keys, passphrases,
 databases, packages, or personal demo content in Git.
 
+For larger recipient groups, create `./cli-data/recipients.txt` with one recipient
+ID per line (blank lines and lines beginning with `#` are ignored), then pass
+`--recipients-file /data/recipients.txt` instead of `--recipients`. You can
+combine both options; duplicate IDs are removed while preserving their order.
+When resolving public keys from validator nodes, add `--remote-identities` and,
+if needed, `--nodes http://validator1:8001,http://validator2:8002,http://validator3:8003`.
+
 The trace console accepts files up to 50 MiB and processes at most 100 pages or
 frames and 120 million grayscale raster pixels per document to limit memory use.
 

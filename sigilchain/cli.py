@@ -41,9 +41,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--file", required=True)
     p = commands.add_parser("encrypt", help="Normalize and encrypt once for recipients")
     p.add_argument("--input", required=True)
-    p.add_argument("--recipients", required=True, help="Comma-separated recipient IDs")
+    p.add_argument("--recipients", help="Comma-separated recipient IDs")
+    p.add_argument("--recipients-file", help="UTF-8 text file with one recipient ID per line; blank lines and lines starting with # are ignored")
     p.add_argument("--out", required=True)
     p.add_argument("--remote-identities", action="store_true")
+    p.add_argument("--nodes", help="Comma-separated validator URLs for remote identity lookup")
     p = commands.add_parser("decrypt", help="Decrypt, watermark, sign, and submit before release")
     p.add_argument("--package", required=True)
     p.add_argument("--as", dest="recipient", required=True)
@@ -74,9 +76,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Registered public identity {public['recipient_id']} version {public['key_version']}.")
         elif args.command == "encrypt":
             pdf = normalize(args.input)
+            recipient_ids = []
+            if args.recipients_file:
+                for line in Path(args.recipients_file).read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        recipient_ids.append(line)
+            if args.recipients:
+                recipient_ids.extend(part.strip() for part in args.recipients.split(",") if part.strip())
+            recipient_ids = list(dict.fromkeys(recipient_ids))
+            if not recipient_ids:
+                raise ValueError("Provide recipients with --recipients or --recipients-file.")
+
             recipients = {}
-            for recipient in dict.fromkeys(x.strip() for x in args.recipients.split(",") if x.strip()):
-                identity = lookup_remote(config.NODE_URLS, recipient) if args.remote_identities else lookup_identity(recipient)
+            nodes = ([part.strip().rstrip("/") for part in args.nodes.split(",") if part.strip()]
+                     if args.nodes else config.NODE_URLS)
+            for recipient in recipient_ids:
+                identity = lookup_remote(nodes, recipient) if args.remote_identities else lookup_identity(recipient)
                 if not identity:
                     print(f"Skipping unknown or revoked identity {recipient!r}.", file=sys.stderr)
                     continue
