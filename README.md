@@ -17,15 +17,17 @@ original separately when needed.
 
 ## Quick start
 
-1. Build images on a connected staging machine with `docker compose --profile tools build`.
-2. Start the validators and trace console with `docker compose --profile local-ui up -d`.
-3. Pin validator fingerprints out of band with `python scripts/pin_validators.py`.
-4. Enroll each recipient: `python -m sigilchain.cli enroll --as alice`.
-5. Encrypt: `python -m sigilchain.cli encrypt --input ./source.docx --recipients alice,bob --out ./package.json`.
-6. On the recipient's device, decrypt: `python -m sigilchain.cli decrypt --package ./package.json --as alice --doc-id memo-001`.
-7. Upload the marked PDF or a page image to `http://127.0.0.1:8501` and download the JSON evidence bundle.
+1. Build images on a connected staging machine: `docker compose --profile tools build`.
+2. Start validators and console: `docker compose --profile local-ui up -d --no-build --pull never`.
+3. Pin validator fingerprints after out-of-band checks: `docker compose --profile tools run --rm cli python scripts/pin_validators.py --out /data/trust/validator_trust.json`.
+4. Enroll each recipient: `docker compose --profile tools run --rm cli python -m sigilchain.cli enroll --as alice`.
+5. Put source files under `./cli-data`, then encrypt: `docker compose --profile tools run --rm cli python -m sigilchain.cli encrypt --input /data/source.docx --recipients alice,bob --out /data/package.json`.
+6. Decrypt as the recipient: `docker compose --profile tools run --rm cli python -m sigilchain.cli decrypt --package /data/package.json --as alice --doc-id memo-001`.
+7. Upload the marked PDF or a page image to `http://127.0.0.1:8501` and download its JSON evidence bundle.
 
-In Docker, the recipient CLI is available with `docker compose --profile tools run --rm cli python -m sigilchain.cli ...`; mount or copy the recipient's own `local_keys` and source/package files under `./cli-data`. Never put private keys, passphrases, databases, packages, or demo content in Git.
+The recipient CLI stores local private keys under `./cli-data/local_keys`; keep
+that directory on the recipient's device. Never put private keys, passphrases,
+databases, packages, or personal demo content in Git.
 
 ## Security model and operational limits
 
@@ -43,7 +45,6 @@ Build/export on a connected staging machine, then transfer the bundle:
 ```powershell
 .\scripts\export_airgap_bundle.ps1
 # copy dist\airgap to the isolated host
-.
 ```
 
 On the isolated Docker host, from the transferred directory:
@@ -61,4 +62,6 @@ requires dependencies/images to be available on the staging machine.
 See [BUILD_STATUS.md](BUILD_STATUS.md) for implementation and test status. The
 portable evidence verifier is `python -m sigilchain.evidence path\bundle.json`
 and requires a trusted identity registry and pinned validator roster for a
-meaningful offline identity check.
+meaningful offline identity check. For the Compose network, run it in the CLI
+container with `--identity-db /data/shared/identity_registry.db` and
+`--validator-trust /data/trust/validator_trust.json`.
