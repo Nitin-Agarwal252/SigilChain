@@ -1,15 +1,17 @@
-cryptography>=44.0
-liboqs-python==0.16.0.1
-numpy>=2.0
-scipy>=1.13
-opencv-python-headless>=4.10
-Pillow>=11.0
-PyMuPDF>=1.24
-reedsolo>=1.7
-fastapi>=0.115
-pydantic>=2.0
-uvicorn[standard]>=0.30
-httpx>=0.27
-streamlit>=1.40
-python-multipart>=0.0.9
-websockets>=15.0
+# --- Available in this build/test sandbox (no install needed there) ---
+numpy
+scipy
+opencv-python-headless==4.10.0.84
+cryptography
+Pillow
+
+# --- NOT available in the build/test sandbox (no network access there) ---
+# Install these locally before running Parts 1/2/4 (PQC), the PDF pipeline,
+# the validator nodes, or the trace console.
+liboqs-python   # ML-KEM / ML-DSA — Part 1, 2, 4
+reedsolo        # Reed-Solomon error correction layer — watermark/payload.py
+PyMuPDF         # PDF <-> page-image rasterize/reassemble — Part 3 (PDF I/O half)
+fastapi         # Validator nodes — Part 5
+uvicorn         # ASGI server to run the FastAPI validator nodes
+httpx           # inter-node calls + trace console -> validator calls
+streamlit       # Trace console UI — Part 6

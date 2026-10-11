@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc"><title id="title">SigilChain red sigil icon</title><desc id="desc">A red S-shaped ledger path with three record nodes inside a seal on a dark square.</desc><rect x="12" y="12" width="488" height="488" rx="112" fill="#101923" stroke="#33262D" stroke-width="4"/>
+<path d="M256 70 L380 132 V248 C380 329 333 390 256 442 C179 390 132 329 132 248 V132 Z" fill="none" stroke="#6B2933" stroke-width="10" stroke-linejoin="round"/>
+<path d="M337 155 C207 155 174 211 252 254 C330 297 305 357 175 357" fill="none" stroke="#EF3340" stroke-width="25" stroke-linecap="round"/>
+<circle cx="337" cy="155" r="19" fill="#101923" stroke="#EF3340" stroke-width="11"/>
+<circle cx="252" cy="254" r="19" fill="#101923" stroke="#EF3340" stroke-width="11"/>
+<circle cx="175" cy="357" r="19" fill="#101923" stroke="#EF3340" stroke-width="11"/></svg>

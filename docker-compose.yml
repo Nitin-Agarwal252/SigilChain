@@ -1,31 +1,58 @@
+# SigilChain, containerized. This replaces the "5 manual terminal windows"
+# local-dev setup with `docker compose up` -- a 3-member etcd/Raft log,
+# 3 validator APIs, and the trace console start together.
+#
+# Security property worth noting explicitly: neither the validator nodes
+# nor the console ever mount local_keys/ (private keys). They only ever
+# need PUBLIC keys, read from the shared identity volume below. A
+# recipient's private key stays wherever they generated it -- it's never
+# something this compose file has a reason to move.
+#
+# API auth: every service below reads SIGILCHAIN_API_KEY from your shell
+# environment (via ${SIGILCHAIN_API_KEY:-}, so it's optional -- unset means
+# auth stays off, exactly like running locally without Docker). Set it
+# before `docker compose up` for anything beyond a one-off local test:
+#   export SIGILCHAIN_API_KEY="$(openssl rand -hex 32)"     # macOS/Linux
+#   $env:SIGILCHAIN_API_KEY = -join ((48..57)+(97..102)|Get-Random -Count 32|%{[char]$_})   # PowerShell
+#
+# Run:
+#   docker compose up --build
+# Then open http://localhost:8501 for the trace console.
+#
+# To run the sender/recipient CLI against this running stack (a one-shot
+# command, not a persistent service):
+#   docker compose run --rm cli python agent/cli.py encrypt \
+#       --pdf /data/yourfile.pdf --recipients nitin,ashish --out /data/package.json
+#   docker compose run --rm cli python agent/cli.py decrypt \
+#       --package /data/package.json --as nitin --doc-id demo-doc
+
 services:
   etcd1:
     image: quay.io/coreos/etcd:v3.6.15
-    pull_policy: never
     command: ["/usr/local/bin/etcd", "--name=etcd1", "--data-dir=/etcd-data", "--listen-client-urls=http://0.0.0.0:2379", "--advertise-client-urls=http://etcd1:2379", "--listen-peer-urls=http://0.0.0.0:2380", "--initial-advertise-peer-urls=http://etcd1:2380", "--initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380", "--initial-cluster-state=new", "--initial-cluster-token=sigilchain-consensus"]
-    volumes: [etcd1_data:/etcd-data]
+    volumes: ["etcd1_data:/etcd-data"]
     networks: [sigilchain]
     healthcheck:
       test: ["CMD", "/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
       interval: 5s
       timeout: 3s
       retries: 20
+
   etcd2:
     image: quay.io/coreos/etcd:v3.6.15
-    pull_policy: never
     command: ["/usr/local/bin/etcd", "--name=etcd2", "--data-dir=/etcd-data", "--listen-client-urls=http://0.0.0.0:2379", "--advertise-client-urls=http://etcd2:2379", "--listen-peer-urls=http://0.0.0.0:2380", "--initial-advertise-peer-urls=http://etcd2:2380", "--initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380", "--initial-cluster-state=new", "--initial-cluster-token=sigilchain-consensus"]
-    volumes: [etcd2_data:/etcd-data]
+    volumes: ["etcd2_data:/etcd-data"]
     networks: [sigilchain]
     healthcheck:
       test: ["CMD", "/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
       interval: 5s
       timeout: 3s
       retries: 20
+
   etcd3:
     image: quay.io/coreos/etcd:v3.6.15
-    pull_policy: never
     command: ["/usr/local/bin/etcd", "--name=etcd3", "--data-dir=/etcd-data", "--listen-client-urls=http://0.0.0.0:2379", "--advertise-client-urls=http://etcd3:2379", "--listen-peer-urls=http://0.0.0.0:2380", "--initial-advertise-peer-urls=http://etcd3:2380", "--initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380", "--initial-cluster-state=new", "--initial-cluster-token=sigilchain-consensus"]
-    volumes: [etcd3_data:/etcd-data]
+    volumes: ["etcd3_data:/etcd-data"]
     networks: [sigilchain]
     healthcheck:
       test: ["CMD", "/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
@@ -35,107 +62,128 @@ services:
 
   validator1:
     image: sigilchain-app:local
-    pull_policy: never
-    build: {context: ., target: app}
-    command: ["uvicorn", "sigilchain.validator:app", "--host", "0.0.0.0", "--port", "8001"]
-    environment: &validator_env
-      SIGILCHAIN_IDENTITY_DB: /data/shared/identity_registry.db
+    build: { context: ., target: app }
+    command: uvicorn validator.node:app --host 0.0.0.0 --port 8001
+    environment:
+      SIGILCHAIN_LEDGER_DB: /app/data/node1/ledger.db
+      SIGILCHAIN_IDENTITY_DB: /app/data/shared/identity_registry.db
       SIGILCHAIN_VALIDATOR_ID: validator1
-      SIGILCHAIN_VALIDATOR_KEY_PATH: /data/validator1/validator_signing_key.json
+      SIGILCHAIN_VALIDATOR_KEY_PATH: /app/data/node1/validator_signing_key.json
       SIGILCHAIN_API_KEY: ${SIGILCHAIN_API_KEY:-}
-      SIGILCHAIN_API_KEY_PREVIOUS: ${SIGILCHAIN_API_KEY_PREVIOUS:-}
       SIGILCHAIN_ETCD_ENDPOINTS: http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
-    volumes: [identity_shared:/data/shared, validator1_keys:/data/validator1]
+    volumes:
+      - validator1_ledger:/app/data/node1
+      - identity_shared:/app/data/shared
     networks: [sigilchain]
     depends_on:
-      etcd1: {condition: service_healthy}
-      etcd2: {condition: service_healthy}
-      etcd3: {condition: service_healthy}
+      etcd1: { condition: service_healthy }
+      etcd2: { condition: service_healthy }
+      etcd3: { condition: service_healthy }
+
   validator2:
     image: sigilchain-app:local
-    pull_policy: never
-    build: {context: ., target: app}
-    command: ["uvicorn", "sigilchain.validator:app", "--host", "0.0.0.0", "--port", "8002"]
+    build: { context: ., target: app }
+    command: uvicorn validator.node:app --host 0.0.0.0 --port 8002
     environment:
-      <<: *validator_env
+      SIGILCHAIN_LEDGER_DB: /app/data/node2/ledger.db
+      SIGILCHAIN_IDENTITY_DB: /app/data/shared/identity_registry.db
       SIGILCHAIN_VALIDATOR_ID: validator2
-      SIGILCHAIN_VALIDATOR_KEY_PATH: /data/validator2/validator_signing_key.json
-    volumes: [identity_shared:/data/shared, validator2_keys:/data/validator2]
+      SIGILCHAIN_VALIDATOR_KEY_PATH: /app/data/node2/validator_signing_key.json
+      SIGILCHAIN_API_KEY: ${SIGILCHAIN_API_KEY:-}
+      SIGILCHAIN_ETCD_ENDPOINTS: http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
+    volumes:
+      - validator2_ledger:/app/data/node2
+      - identity_shared:/app/data/shared
     networks: [sigilchain]
     depends_on:
-      etcd1: {condition: service_healthy}
-      etcd2: {condition: service_healthy}
-      etcd3: {condition: service_healthy}
+      etcd1: { condition: service_healthy }
+      etcd2: { condition: service_healthy }
+      etcd3: { condition: service_healthy }
+
   validator3:
     image: sigilchain-app:local
-    pull_policy: never
-    build: {context: ., target: app}
-    command: ["uvicorn", "sigilchain.validator:app", "--host", "0.0.0.0", "--port", "8003"]
+    build: { context: ., target: app }
+    command: uvicorn validator.node:app --host 0.0.0.0 --port 8003
     environment:
-      <<: *validator_env
+      SIGILCHAIN_LEDGER_DB: /app/data/node3/ledger.db
+      SIGILCHAIN_IDENTITY_DB: /app/data/shared/identity_registry.db
       SIGILCHAIN_VALIDATOR_ID: validator3
-      SIGILCHAIN_VALIDATOR_KEY_PATH: /data/validator3/validator_signing_key.json
-    volumes: [identity_shared:/data/shared, validator3_keys:/data/validator3]
+      SIGILCHAIN_VALIDATOR_KEY_PATH: /app/data/node3/validator_signing_key.json
+      SIGILCHAIN_API_KEY: ${SIGILCHAIN_API_KEY:-}
+      SIGILCHAIN_ETCD_ENDPOINTS: http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
+    volumes:
+      - validator3_ledger:/app/data/node3
+      - identity_shared:/app/data/shared
     networks: [sigilchain]
     depends_on:
-      etcd1: {condition: service_healthy}
-      etcd2: {condition: service_healthy}
-      etcd3: {condition: service_healthy}
+      etcd1: { condition: service_healthy }
+      etcd2: { condition: service_healthy }
+      etcd3: { condition: service_healthy }
 
   console:
     image: sigilchain-app:local
-    pull_policy: never
-    build: {context: ., target: app}
-    command: ["streamlit", "run", "trace_console.py", "--server.address", "0.0.0.0", "--server.headless", "true"]
+    build: { context: ., target: app }
+    command: streamlit run trace_console/app.py --server.address 0.0.0.0 --server.headless true
     environment:
-      SIGILCHAIN_NODE_URLS: http://validator1:8001,http://validator2:8002,http://validator3:8003
-      SIGILCHAIN_IDENTITY_DB: /data/shared/identity_registry.db
-      SIGILCHAIN_VALIDATOR_TRUST_FILE: /data/trust/validator_trust.json
+      SIGILCHAIN_NODE_URLS: "http://validator1:8001,http://validator2:8002,http://validator3:8003"
+      SIGILCHAIN_IDENTITY_DB: /app/data/shared/identity_registry.db
+      SIGILCHAIN_VALIDATOR_TRUST_FILE: /app/data/trust/validator_trust.json
       SIGILCHAIN_WATERMARK_TRANSFORM: ${SIGILCHAIN_WATERMARK_TRANSFORM:-dct}
       SIGILCHAIN_API_KEY: ${SIGILCHAIN_API_KEY:-}
-      SIGILCHAIN_API_KEY_PREVIOUS: ${SIGILCHAIN_API_KEY_PREVIOUS:-}
-    volumes: [identity_shared:/data/shared, validator_trust:/data/trust]
+    volumes:
+      - identity_shared:/app/data/shared
+      - validator_trust:/app/data/trust
     networks: [sigilchain]
-    depends_on: [validator1, validator2, validator3]
+    depends_on:
+      - validator1
+      - validator2
+      - validator3
 
+  # Docker Desktop does not route localhost-published ports from an
+  # internal network. This opt-in, loopback-only proxy exposes only the
+  # console while the app and consensus network stays egress-isolated.
   console-proxy:
     image: sigilchain-app:local
-    pull_policy: never
-    build: {context: ., target: app}
-    profiles: [local-ui]
-    command: ["uvicorn", "sigilchain.console_proxy:app", "--host", "0.0.0.0", "--port", "8501"]
+    profiles: ["local-ui"]
+    command: uvicorn scripts.console_proxy:app --host 0.0.0.0 --port 8501
     ports: ["127.0.0.1:8501:8501"]
     networks: [sigilchain, console_frontend]
     depends_on: [console]
 
+  # Not started by default (`docker compose up` ignores profile-tagged
+  # services) -- invoked ad-hoc via `docker compose run cli ...` as shown
+  # above. Mounts ./cli-data for whatever recipient is using it: their own
+  # local_keys/ (private, this recipient's only) plus read access to the
+  # same shared identity registry the validators use.
   cli:
     image: sigilchain-cli:local
-    pull_policy: never
-    build: {context: ., target: cli}
-    profiles: [tools]
+    build: { context: ., target: cli }
+    profiles: ["tools"]
     environment:
-      SIGILCHAIN_NODE_URLS: http://validator1:8001,http://validator2:8002,http://validator3:8003
-      SIGILCHAIN_IDENTITY_DB: /data/shared/identity_registry.db
+      SIGILCHAIN_NODE_URLS: "http://validator1:8001,http://validator2:8002,http://validator3:8003"
+      SIGILCHAIN_IDENTITY_DB: /app/data/shared/identity_registry.db
       SIGILCHAIN_KEYS_DIR: /data/local_keys
-      SIGILCHAIN_VALIDATOR_TRUST_FILE: /data/trust/validator_trust.json
+      SIGILCHAIN_VALIDATOR_TRUST_FILE: /app/data/trust/validator_trust.json
       SIGILCHAIN_WATERMARK_TRANSFORM: ${SIGILCHAIN_WATERMARK_TRANSFORM:-dct}
       SIGILCHAIN_API_KEY: ${SIGILCHAIN_API_KEY:-}
-      SIGILCHAIN_API_KEY_PREVIOUS: ${SIGILCHAIN_API_KEY_PREVIOUS:-}
       SIGILCHAIN_ETCD_ENDPOINTS: http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
-    volumes: ["./cli-data:/data", identity_shared:/data/shared, validator_trust:/data/trust]
+    volumes:
+      - identity_shared:/app/data/shared
+      - validator_trust:/app/data/trust
+      - ./cli-data:/data
     working_dir: /app
     networks: [sigilchain]
-    depends_on: [validator1, validator2, validator3]
 
 volumes:
   etcd1_data:
   etcd2_data:
   etcd3_data:
+  validator1_ledger:
+  validator2_ledger:
+  validator3_ledger:
   identity_shared:
-  validator1_keys:
-  validator2_keys:
-  validator3_keys:
   validator_trust:
+
 networks:
   sigilchain:
     internal: true
