@@ -498,14 +498,7 @@ Each ingredient (DCT watermarking, digital signatures, replicated logs) is estab
 
 ---
 
-## Team
 
-| Name | Role |
-| --- | --- |
-| `[Member One]` | `[Role]` |
-| `[Member Two]` | `[Role]` |
-
-Contact: `[team-email@example.com]` &middot; `github.com/[your-repo]`
 
 ---
 
