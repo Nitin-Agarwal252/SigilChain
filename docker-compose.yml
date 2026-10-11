@@ -22,7 +22,7 @@
 # To run the sender/recipient CLI against this running stack (a one-shot
 # command, not a persistent service):
 #   docker compose run --rm cli python agent/cli.py encrypt \
-#       --pdf /data/yourfile.pdf --recipients nitin,ashish --out /data/package.json
+#       --pdf /data/yourfile.pdf --sender nitin --recipients nitin,ashish --out /data/package.json
 #   docker compose run --rm cli python agent/cli.py decrypt \
 #       --package /data/package.json --as nitin --doc-id demo-doc
 

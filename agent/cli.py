@@ -15,6 +15,7 @@ together automatically: decrypt -> watermark every page -> sign a record
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import sys
@@ -27,17 +28,18 @@ import config
 from crypto.keys import (load_identity, lookup_identity, generate_identity,
                          register_identity, rotate_identity, revoke_identity,
                          protect_local_identity)
-from crypto.encrypt import encrypt_document
+from crypto.encrypt import encrypt_document, canonical_json
 from crypto.decrypt import decrypt_document
 from crypto.normalize_document import normalize_to_pdf
-from crypto.sign import build_record, sign_record
+from crypto.sign import build_record, sign_record, serialize_record, verify_record
+from crypto.transfer import build_transfer_record, sign_transfer, new_transfer_id
 from watermark.pdf_utils import pdf_to_grayscale_images, images_to_pdf
 if config.WATERMARK_TRANSFORM == "dwt-dct":
     from watermark.dwt_dct_watermark import embed_bits
 else:
     from watermark.dct_watermark import embed_bits
 from watermark.payload import generate_watermark_id, bytes_to_bits, pack_for_embedding, RS_AVAILABLE
-from agent.quorum_client import submit_to_quorum, lookup_identity_remote
+from agent.quorum_client import submit_to_quorum, lookup_identity_remote, check_watermark
 
 DEFAULT_NODES = config.NODE_URLS
 
@@ -87,10 +89,11 @@ def cmd_encrypt(args):
 
     print(f"Encrypting normalized PDF from {args.input_file} ({len(pdf_bytes)} bytes) for {len(recipients)} recipient(s): "
           f"{list(recipients.keys())}")
-    package = encrypt_document(pdf_bytes, recipients)
+    sender_private = load_identity(args.sender)
+    package = encrypt_document(pdf_bytes, recipients, sender_id=args.sender,
+                               sender_identity=sender_private)
 
-    with open(args.out, "w") as f:
-        json.dump(package, f, indent=2)
+    _atomic_json_write(args.out, package)
     print(f"Wrote encrypted package to {args.out} "
           f"({os.path.getsize(args.out) / 1024:.1f} KB for {len(recipients)} recipient(s))")
 
@@ -141,8 +144,16 @@ def cmd_decrypt(args):
         package = json.load(f)
 
     recipient_private = load_identity(args.as_recipient)
+    sender_identity = None
+    if package.get("package_version") == 2:
+        sender = package.get("sender") or {}
+        if not sender.get("recipient_id"):
+            raise ValueError("Signed package is missing its sender identity")
+        sender_identity = lookup_identity(sender["recipient_id"],
+                                          key_version=sender.get("key_version", 1),
+                                          allow_revoked=True)
     print(f"Decrypting as '{args.as_recipient}'...")
-    pdf_bytes = decrypt_document(package, args.as_recipient, recipient_private)
+    pdf_bytes = decrypt_document(package, args.as_recipient, recipient_private, sender_identity)
     print(f"Decrypted: {len(pdf_bytes)} bytes")
 
     print("Rasterizing pages...")
@@ -172,6 +183,8 @@ def cmd_decrypt(args):
         watermark_id=watermark_id.hex(),
         marked_pdf_bytes=marked_pdf_bytes,
         key_version=recipient_private.get("key_version", 1),
+        package_id=package.get("package_id"),
+        transfer_event_id=(package.get("lineage") or {}).get("parent_transfer_event_id"),
     )
     signature = sign_record(record_bytes, recipient_private["sig_alg"],
                              bytes.fromhex(recipient_private["sig_secret"]))
@@ -219,6 +232,128 @@ def cmd_decrypt(args):
               "The marked PDF was not released. Check that enough validator nodes are running.")
 
 
+def _atomic_json_write(path: str, value: dict) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False,
+                                         dir=parent, prefix=".sigilchain-transfer-", suffix=".tmp") as f:
+            temp_path = f.name
+            json.dump(value, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+def _require_committed_parent_transfer(nodes: list[str], event_id: str, *, holder_id: str,
+                                       document_id: str, package_id: str,
+                                       package_sha256: str, document_sha256: str) -> None:
+    """Reject a new hop unless its incoming package matches a verified prior quorum event."""
+    views = check_watermark(nodes, event_id)
+    groups = {}
+    for view in views:
+        if not (view.get("found") and view.get("chain_valid") and view.get("validator_trusted")
+                and view.get("validator_id")):
+            continue
+        record = view.get("record") or {}
+        if record.get("event_type") != "document_transfer" or record.get("event_id") != event_id:
+            continue
+        try:
+            record_bytes = serialize_record(record)
+            signature = bytes.fromhex(view["signature_hex"])
+            signer = lookup_identity(record["from_id"], key_version=record["from_key_version"],
+                                     allow_revoked=True)
+            if not verify_record(record_bytes, signature, signer["sig_alg"],
+                                 bytes.fromhex(signer["sig_public"])):
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        key = (record_bytes.hex(), view["signature_hex"])
+        groups.setdefault(key, {"record": record, "validators": set()})["validators"].add(view["validator_id"])
+    for group in groups.values():
+        record = group["record"]
+        if len(group["validators"]) < config.QUORUM_REQUIRED:
+            continue
+        matches_package = (
+            record.get("to_id") == holder_id
+            and record.get("doc_id") == document_id
+            and record.get("target_package_id") == package_id
+            and record.get("target_package_sha256") == package_sha256
+            and record.get("target_document_sha256") == document_sha256
+        )
+        if matches_package:
+            return
+    raise ValueError("Incoming package does not match a sender-signed transfer event committed by a trusted validator quorum.")
+
+
+def cmd_transfer(args):
+    """Re-encrypt for the next holder and commit signed handoff before release."""
+    sender_private = load_identity(args.from_id)
+    recipient = lookup_identity(args.to_id)
+    source_package = None
+    source_package_id = None
+    source_package_hash = None
+    parent_transfer_id = None
+    nodes = args.nodes.split(",") if args.nodes else DEFAULT_NODES
+
+    if args.package:
+        with open(args.package, encoding="utf-8") as f:
+            source_package = json.load(f)
+        source_package_id = source_package.get("package_id")
+        source_package_hash = hashlib.sha256(canonical_json(source_package)).hexdigest()
+        sender_meta = source_package.get("sender") or {}
+        sender_registry = None
+        if source_package.get("package_version") == 2:
+            sender_registry = lookup_identity(sender_meta.get("recipient_id", ""),
+                                              key_version=sender_meta.get("key_version", 1),
+                                              allow_revoked=True)
+        holder_version = (source_package.get("recipients", {}).get(args.from_id, {})
+                          .get("key_version") if source_package.get("package_version") == 2 else None)
+        holder_private = (load_identity(args.from_id, key_version=holder_version)
+                          if holder_version is not None else sender_private)
+        document_bytes = decrypt_document(source_package, args.from_id, holder_private, sender_registry)
+        parent_transfer_id = (source_package.get("lineage") or {}).get("parent_transfer_event_id")
+        if parent_transfer_id:
+            _require_committed_parent_transfer(
+                nodes, parent_transfer_id, holder_id=args.from_id, document_id=args.doc_id,
+                package_id=source_package_id, package_sha256=source_package_hash,
+                document_sha256=hashlib.sha256(document_bytes).hexdigest(),
+            )
+    else:
+        document_bytes = normalize_to_pdf(args.input_file)
+
+    transfer_id = new_transfer_id()
+    target_package = encrypt_document(
+        document_bytes, {args.to_id: recipient}, sender_id=args.from_id,
+        sender_identity=sender_private, parent_transfer_event_id=transfer_id,
+    )
+    record_bytes = build_transfer_record(
+        transfer_id=transfer_id, document_id=args.doc_id,
+        sender=sender_private, recipient=recipient,
+        source_package_id=source_package_id,
+        source_package_sha256=source_package_hash,
+        source_document_sha256=hashlib.sha256(document_bytes).hexdigest(),
+        target_package=target_package,
+        parent_transfer_event_id=parent_transfer_id,
+    )
+    signature = sign_transfer(record_bytes, sender_private)
+    print(f"Recording handoff {args.from_id} -> {args.to_id} in validator quorum...")
+    result = submit_to_quorum(nodes, transfer_id, record_bytes, signature,
+                              args.from_id, required=config.QUORUM_REQUIRED)
+    print(f"Committed: {result['committed']}")
+    print(f"Accepted by: {[entry['url'] for entry in result['accepted_by']]}")
+    if not result["committed"]:
+        raise RuntimeError("Handoff did not reach the configured validator quorum; target package was not released.")
+    _atomic_json_write(args.out, target_package)
+    print(f"Wrote recipient package to {args.out}")
+    print(f"Transfer event ID: {transfer_id}")
+    print("This records a signed handoff claim; it does not prove the file was physically delivered or opened.")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="sigilchain")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -246,6 +381,8 @@ def main():
                         help="Comma-separated recipient IDs, e.g. nitin,ashish")
     p_enc.add_argument("--recipients-file", default=None,
                         help="Path to a text file, one recipient ID per line -- for bulk sends (10s-100s of recipients)")
+    p_enc.add_argument("--sender", required=True,
+                        help="Enrolled local identity that signs the package manifest")
     p_enc.add_argument("--remote-identities", action="store_true",
                         help="Resolve recipients' public keys via the validator nodes' network "
                              "/identity endpoint instead of the local registry file -- needed when "
@@ -264,6 +401,21 @@ def main():
     p_dec.add_argument("--nodes", default=None,
                         help="Comma-separated validator node URLs (default: localhost:8001-8003)")
     p_dec.set_defaults(func=cmd_decrypt)
+
+    p_transfer = sub.add_parser(
+        "transfer", help="Create a signed, quorum-committed handoff package for the next recipient"
+    )
+    transfer_source = p_transfer.add_mutually_exclusive_group(required=True)
+    transfer_source.add_argument("--input", dest="input_file",
+                                 help="Initial source document; the sender creates the first recipient package")
+    transfer_source.add_argument("--package", help="Existing package; current holder decrypts and re-encrypts it")
+    p_transfer.add_argument("--from", dest="from_id", required=True, help="Current holder's enrolled identity")
+    p_transfer.add_argument("--to", dest="to_id", required=True, help="Next recipient's enrolled identity")
+    p_transfer.add_argument("--doc-id", required=True, help="Stable document identifier used in the transfer trail")
+    p_transfer.add_argument("--out", default="transfer-package.json", help="Path for the next recipient's package")
+    p_transfer.add_argument("--nodes", default=None,
+                            help="Comma-separated validator node URLs (default: localhost:8001-8003)")
+    p_transfer.set_defaults(func=cmd_transfer)
 
     args = parser.parse_args()
     args.func(args)

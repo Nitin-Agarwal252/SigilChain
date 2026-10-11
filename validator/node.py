@@ -27,6 +27,7 @@ standalone local-SQLite nodes.
 import hashlib
 import json
 import os
+import re
 import sys
 
 from fastapi import Depends, FastAPI, HTTPException, Security
@@ -130,19 +131,59 @@ def submit(req: SubmitRequest) -> SubmitResponse:
     if not isinstance(record, dict):
         return SubmitResponse(accepted=False, reason="signed record must be a JSON object")
 
-    # The database lookup key and submitter identity must be covered by the
-    # exact bytes the recipient signed. Otherwise an attacker could index a
-    # valid signed event under a different watermark ID or recipient.
-    if record.get("watermark_id") != req.watermark_id:
-        return SubmitResponse(accepted=False, reason="watermark_id does not match signed record")
-    if record.get("recipient_id") != req.recipient_id:
-        return SubmitResponse(accepted=False, reason="recipient_id does not match signed record")
-    if record.get("key_version", 1) != identity["key_version"]:
-        return SubmitResponse(accepted=False, reason="record was not signed by the active recipient key version")
+    # Handoffs share the ordered event log with decryption-session records.
+    # The path/actor/recipient key versions are signed, and validators check
+    # the sender is active and the package targets the currently registered
+    # recipient key before committing the event.
+    if record.get("event_type") == "document_transfer":
+        canonical_record = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if canonical_record != record_bytes:
+            return SubmitResponse(accepted=False, reason="transfer record is not canonical JSON")
+        if record.get("event_id") != req.watermark_id:
+            return SubmitResponse(accepted=False, reason="event_id does not match ledger lookup key")
+        if not re.fullmatch(r"[0-9a-f]{32}", req.watermark_id):
+            return SubmitResponse(accepted=False, reason="transfer event id must be 32 lowercase hex characters")
+        if record.get("from_id") != req.recipient_id:
+            return SubmitResponse(accepted=False, reason="from_id does not match authenticated signer")
+        if record.get("from_key_version") != identity["key_version"]:
+            return SubmitResponse(accepted=False, reason="transfer was not signed by the active sender key version")
+        if record.get("from_sig_alg") != identity["sig_alg"]:
+            return SubmitResponse(accepted=False, reason="transfer signer algorithm does not match registered identity")
+        try:
+            target = lookup_identity(record["to_id"])
+        except (KeyError, PermissionError):
+            return SubmitResponse(accepted=False, reason="transfer target identity is unknown or revoked")
+        if (record.get("to_key_version") != target["key_version"]
+                or record.get("to_kem_public_sha256") != hashlib.sha256(bytes.fromhex(target["kem_public"])).hexdigest()
+                or record.get("to_sig_public_sha256") != hashlib.sha256(bytes.fromhex(target["sig_public"])).hexdigest()):
+            return SubmitResponse(accepted=False, reason="transfer target key does not match the active registered identity")
+        parent_id = record.get("parent_transfer_event_id")
+        if parent_id is not None and not re.fullmatch(r"[0-9a-f]{32}", str(parent_id)):
+            return SubmitResponse(accepted=False, reason="parent transfer event id is malformed")
+        if not all(record.get(field) for field in ("doc_id", "target_package_id", "target_package_sha256",
+                                                   "source_document_sha256", "target_document_sha256")):
+            return SubmitResponse(accepted=False, reason="transfer record is missing required document/package fields")
+        if (not re.fullmatch(r"[0-9a-f]{32}", str(record["target_package_id"]))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(record["target_package_sha256"]))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(record["source_document_sha256"]))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(record["target_document_sha256"]))):
+            return SubmitResponse(accepted=False, reason="transfer package or document hash is malformed")
+        if record["source_document_sha256"] != record["target_document_sha256"]:
+            return SubmitResponse(accepted=False, reason="transfer target package changes the document content hash")
+        sig_public = bytes.fromhex(identity["sig_public"])
+        sig_alg = identity["sig_alg"]
+    else:
+        # Existing decryption-session records keep their original schema.
+        if record.get("watermark_id") != req.watermark_id:
+            return SubmitResponse(accepted=False, reason="watermark_id does not match signed record")
+        if record.get("recipient_id") != req.recipient_id:
+            return SubmitResponse(accepted=False, reason="recipient_id does not match signed record")
+        if record.get("key_version", 1) != identity["key_version"]:
+            return SubmitResponse(accepted=False, reason="record was not signed by the active recipient key version")
+        sig_public = bytes.fromhex(identity["sig_public"])
+        sig_alg = identity["sig_alg"]
 
-    sig_public = bytes.fromhex(identity["sig_public"])
-
-    valid = verify_record(record_bytes, signature, identity["sig_alg"], sig_public)
+    valid = verify_record(record_bytes, signature, sig_alg, sig_public)
     if not valid:
         return SubmitResponse(accepted=False, reason="signature verification failed")
 

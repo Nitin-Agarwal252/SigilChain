@@ -1,6 +1,6 @@
 param(
     [string]$InputFile,
-    [string[]]$Recipients = @("nitin", "ashish"),
+    [string[]]$Recipients = @("nitin", "ashish", "rahul_demo"),
     [string]$DecryptAs,
     [string]$DocumentId = "demo-$(Get-Date -Format yyyyMMdd-HHmmss)",
     [string]$BundleDirectory = $(if (Test-Path (Join-Path $PSScriptRoot "sigilchain-images.tar")) { $PSScriptRoot } else { Join-Path $PSScriptRoot "dist\airgap" })
@@ -13,17 +13,17 @@ $composeFile = Join-Path $bundle "docker-compose.yml"
 if (-not (Test-Path -LiteralPath $composeFile)) {
     throw "No offline Compose bundle found at '$bundle'. Run scripts\export_airgap_bundle.ps1 first."
 }
-if (-not $Recipients -or $Recipients.Count -eq 0) {
-    throw "Provide at least one recipient ID with -Recipients."
+if (-not $Recipients -or $Recipients.Count -lt 2) {
+    throw "Provide at least two recipient IDs with -Recipients to demonstrate a committed handoff trail."
 }
 foreach ($recipient in $Recipients) {
     if ($recipient -notmatch '^[A-Za-z0-9_.-]{1,64}$') {
         throw "Invalid recipient ID '$recipient'. Use only letters, numbers, dot, underscore, or hyphen."
     }
 }
-if (-not $DecryptAs) { $DecryptAs = $Recipients[0] }
-if ($Recipients -notcontains $DecryptAs) {
-    throw "DecryptAs '$DecryptAs' must be in Recipients: $($Recipients -join ', ')."
+if (-not $DecryptAs) { $DecryptAs = $Recipients[-1] }
+if ($DecryptAs -cne $Recipients[-1]) {
+    throw "For a complete handoff trail, DecryptAs must be the final recipient '$($Recipients[-1])'."
 }
 if ($DocumentId -notmatch '^[A-Za-z0-9._-]{1,80}$') {
     throw "DocumentId may contain only letters, numbers, dot, underscore, and hyphen (max 80 chars)."
@@ -124,7 +124,7 @@ try {
         Write-Host "For this single-host demo only, typing PIN records the local demo validators; it is not independent identity verification."
         Invoke-Cli -CliArgs @("python", "scripts/bootstrap_validator_trust.py", "--nodes", "http://validator1:8001,http://validator2:8002,http://validator3:8003", "--out", "/app/data/trust/validator_trust.json")
     }
-    Wait-ForEnter "Setup and validator trust are ready. Press Enter to enroll/check recipient identities"
+    Wait-ForEnter "Setup and validator trust are ready. Press Enter to enroll/check the sender and recipients"
 
     Show-Stage 2 "RECIPIENT IDENTITIES"
     foreach ($recipient in $Recipients) {
@@ -137,9 +137,11 @@ try {
             Invoke-Cli -CliArgs @("python", "agent/cli.py", "enroll", "--as", $recipient)
         }
     }
-    Wait-ForEnter "Recipient identities are ready. Press Enter to choose the source document"
+    Write-Host "The first identity sends the source; every later identity receives a signed handoff."
+    Write-Host "Every sender and the final decryptor need their own local key and remembered passphrase."
+    Wait-ForEnter "Identities are ready. Press Enter to choose the source document"
 
-    Show-Stage 3 "ENCRYPTION"
+    Show-Stage 3 "SIGNED ENCRYPTION AND COMMITTED HANDOFF TRAIL"
     if (-not $InputFile) {
         $sample = Join-Path $project "ISRO -Hackathon.pdf"
         if (Test-Path -LiteralPath $sample) {
@@ -153,13 +155,39 @@ try {
     $stagedSource = Join-Path $inputDirectory (Split-Path -Leaf $source)
     Copy-Item -LiteralPath $source -Destination $stagedSource -Force
     $containerSource = "/data/demo-input/$(Split-Path -Leaf $source)"
-    $recipientList = $Recipients -join ","
-    Write-Host "Encrypting '$source' for: $recipientList"
-    Invoke-Cli -CliArgs @("python", "agent/cli.py", "encrypt", "--input", $containerSource, "--recipients", $recipientList, "--out", "/data/package.json")
-    Wait-ForEnter "Encrypted package is ready at $dataRoot\package.json. Press Enter to decrypt as $DecryptAs"
+    Write-Host "Normalizing '$source' and creating a signed package for the first recipient."
+    Write-Host "Package security: ML-KEM-768 recipient key encapsulation, HKDF-SHA256, AES-256-GCM, and an ML-DSA-65 sender signature."
+    Write-Host "Each onward handoff is signed by its current holder and released only after validator quorum commit."
+
+    $currentPackage = Join-Path $dataRoot "package-$($Recipients[1]).json"
+    $firstHopArgs = @(
+        "python", "agent/cli.py", "transfer", "--input", $containerSource,
+        "--from", $Recipients[0], "--to", $Recipients[1],
+        "--doc-id", $DocumentId, "--out", "/data/package-$($Recipients[1]).json"
+    )
+    Write-Host "Recording first handoff: $($Recipients[0]) -> $($Recipients[1])"
+    Invoke-Cli -CliArgs $firstHopArgs
+
+    for ($i = 1; $i -lt ($Recipients.Count - 1); $i++) {
+        $fromId = $Recipients[$i]
+        $toId = $Recipients[$i + 1]
+        $nextPackage = Join-Path $dataRoot "package-$toId.json"
+        Write-Host "Recording next handoff: $fromId -> $toId"
+        Invoke-Cli -CliArgs @(
+            "python", "agent/cli.py", "transfer", "--package", "/data/package-$fromId.json",
+            "--from", $fromId, "--to", $toId,
+            "--doc-id", $DocumentId, "--out", "/data/package-$toId.json"
+        )
+        $currentPackage = $nextPackage
+    }
+    if (-not (Test-Path -LiteralPath $currentPackage)) {
+        throw "The final recipient package was not created: $currentPackage"
+    }
+    Write-Host "Final signed package: $currentPackage"
+    Wait-ForEnter "Handoff trail committed. Press Enter to decrypt as $DecryptAs"
 
     Show-Stage 4 "RECIPIENT DECRYPTION, WATERMARK, SIGNATURE, AND QUORUM"
-    Invoke-Cli -CliArgs @("python", "agent/cli.py", "decrypt", "--package", "/data/package.json", "--as", $DecryptAs, "--doc-id", $DocumentId, "--out-dir", "/data/decrypted")
+    Invoke-Cli -CliArgs @("python", "agent/cli.py", "decrypt", "--package", "/data/package-$DecryptAs.json", "--as", $DecryptAs, "--doc-id", $DocumentId, "--out-dir", "/data/decrypted")
     $markedPdf = Join-Path $outputDirectory "$($DocumentId)_$($DecryptAs).pdf"
     if (-not (Test-Path -LiteralPath $markedPdf)) {
         throw "Marked PDF was not created. Check that decrypt reported Committed: True."
@@ -174,8 +202,8 @@ try {
     Write-Host "Demo leaked-page image: $leakPath"
     Write-Host "Trace console: http://localhost:8501"
     try { Start-Process "http://localhost:8501" } catch { Write-Host "Open http://localhost:8501 in your browser." }
-    Write-Host "Upload leaked_page.png (or the marked PDF) and download the JSON evidence bundle after the trace verifies."
-    Write-Host "The evidence links the recovered copy to a signed decryption-session record; it does not prove who distributed the copy."
+    Write-Host "Upload leaked_page.png (or the marked PDF). The verified result should show the signed handoff trail: $($Recipients -join ' -> ')."
+    Write-Host "Download the JSON evidence bundle after verification. Signatures link records to keys; they do not prove physical delivery or who distributed the copy."
     Wait-ForEnter "Demo complete. Press Enter to leave the offline stack running"
 }
 catch {

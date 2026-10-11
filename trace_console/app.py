@@ -46,6 +46,79 @@ from agent.quorum_client import check_watermark, verify_chain_proof
 
 NODE_URLS = config.NODE_URLS
 
+
+def _verified_transfer_trail(first_event_id: str | None) -> tuple[list[dict], str | None]:
+    """Walk transfer parent IDs, requiring a trusted quorum and sender signature at each step."""
+    if not first_event_id:
+        return [], None
+    newest_first = []
+    seen = set()
+    current = first_event_id
+    try:
+        while current:
+            if current in seen or len(seen) >= 32:
+                return [], "Transfer trail contains a cycle or exceeds 32 events."
+            seen.add(current)
+            views = check_watermark(NODE_URLS, current)
+            unique = {}
+            for view in views:
+                if (view.get("found") and view.get("chain_valid") and view.get("validator_trusted")
+                        and view.get("validator_id")):
+                    unique.setdefault(view["validator_id"], view)
+            groups = {}
+            for view in unique.values():
+                record = view.get("record") or {}
+                if (record.get("event_type") != "document_transfer"
+                        or record.get("event_id") != current):
+                    continue
+                canonical = serialize_record(record)
+                signature = bytes.fromhex(view["signature_hex"])
+                try:
+                    identity = lookup_identity(
+                        record["from_id"], key_version=record["from_key_version"], allow_revoked=True
+                    )
+                    valid_signature = verify_record(
+                        canonical, signature, identity["sig_alg"], bytes.fromhex(identity["sig_public"])
+                    )
+                except (KeyError, ValueError, TypeError):
+                    valid_signature = False
+                if not valid_signature:
+                    continue
+                fingerprint = (canonical.hex(), view["signature_hex"])
+                group = groups.setdefault(fingerprint, {
+                    "record": record, "signature_hex": view["signature_hex"],
+                    "sender_public_identity": {"recipient_id": record["from_id"],
+                                               "key_version": record["from_key_version"],
+                                               "sig_alg": identity["sig_alg"],
+                                               "sig_public": identity["sig_public"]},
+                    "nodes": [],
+                })
+                group["nodes"].append(view)
+            quorum = next((group for group in groups.values()
+                           if len(group["nodes"]) >= config.QUORUM_REQUIRED), None)
+            if quorum is None:
+                return [], f"Transfer event {current} did not have a valid trusted quorum and sender signature."
+            newest_first.append({
+                "record": quorum["record"],
+                "signature_hex": quorum["signature_hex"],
+                "sender_signature_verified_client_side": True,
+                "sender_public_identity": quorum["sender_public_identity"],
+                "validator_evidence": [{
+                    "validator_id": view["validator_id"],
+                    "entry_hash": view["entry_hash"],
+                    "ledger_backend": view.get("ledger_backend"),
+                    "receipt": view.get("receipt"),
+                    "receipt_signature_hex": view.get("receipt_signature_hex"),
+                    "validator_public_key": view.get("validator_public_key"),
+                    "validator_sig_alg": view.get("validator_sig_alg"),
+                } for view in quorum["nodes"]],
+                "validator_chain_proofs": [view.get("chain_proof", []) for view in quorum["nodes"]],
+            })
+            current = quorum["record"].get("parent_transfer_event_id")
+        return list(reversed(newest_first)), None
+    except Exception as exc:
+        return [], f"Could not verify transfer trail: {exc}"
+
 # Must match agent/cli.py's value -- if these drift out of sync,
 # extraction silently breaks.
 EMBED_REPEAT = config.EMBED_REPEAT
@@ -260,6 +333,28 @@ def check_image(arr: np.ndarray) -> dict:
     record = event["record"]
     signature_hex = event["signatures"][0]
     recipient_id = record["recipient_id"]
+    transfer_trail, transfer_trail_error = _verified_transfer_trail(record.get("transfer_event_id"))
+    if transfer_trail:
+        endpoint = transfer_trail[-1]["record"]
+        if (endpoint.get("event_id") != record.get("transfer_event_id")
+                or endpoint.get("to_id") != record.get("recipient_id")
+                or endpoint.get("doc_id") != record.get("doc_id")
+                or endpoint.get("target_package_id") != record.get("package_id")):
+            transfer_trail = []
+            transfer_trail_error = "The verified transfer trail does not end at this recipient and document."
+        else:
+            for older, newer in zip(transfer_trail, transfer_trail[1:]):
+                previous = older["record"]
+                following = newer["record"]
+                if (following.get("parent_transfer_event_id") != previous.get("event_id")
+                        or previous.get("to_id") != following.get("from_id")
+                        or previous.get("doc_id") != following.get("doc_id")
+                        or previous.get("target_package_id") != following.get("source_package_id")
+                        or previous.get("target_package_sha256") != following.get("source_package_sha256")
+                        or previous.get("target_document_sha256") != following.get("source_document_sha256")):
+                    transfer_trail = []
+                    transfer_trail_error = "A transfer link, holder, document ID, or document hash is inconsistent."
+                    break
 
     return {
         "status": "verified",
@@ -285,6 +380,8 @@ def check_image(arr: np.ndarray) -> dict:
         "extraction_source": extraction_source,
         "submitted_page_sha256": submitted_page_sha256,
         "recipient_id": recipient_id,
+        "transfer_trail": transfer_trail,
+        "transfer_trail_error": transfer_trail_error,
     }
 
 
@@ -351,6 +448,8 @@ def render_result(result: dict, page_label: str = ""):
         "recovery_agreement": result["confidence"],
         "extraction_source": result["extraction_source"],
         "record": record,
+        "transfer_trail": result.get("transfer_trail", []),
+        "transfer_trail_error": result.get("transfer_trail_error"),
         "signature_hex": result["signature_hex"],
         "canonical_record_bytes_hex": result["record_bytes_hex"],
         "validator_evidence": result["validator_evidence"],
@@ -388,6 +487,20 @@ def render_result(result: dict, page_label: str = ""):
               <div><span class="sc-label">Recovery path</span><br><b>{extraction_source}</b></div>
             </div>
         </div>""", unsafe_allow_html=True)
+        trail = result.get("transfer_trail", [])
+        if trail:
+            st.markdown("#### Document transfer trail")
+            for handoff in trail:
+                event = handoff["record"]
+                sender = html.escape(str(event.get("from_id", "unknown")))
+                recipient = html.escape(str(event.get("to_id", "unknown")))
+                when = html.escape(str(event.get("timestamp", "")))
+                st.markdown(f"**{sender} → {recipient}** · signed handoff · {when}")
+            st.caption("Each hop is sender-signed and quorum-committed. The trail records claimed handoffs; it does not prove physical delivery.")
+        elif record.get("transfer_event_id"):
+            st.warning(result.get("transfer_trail_error") or "The package references a transfer event, but no verified trail was returned.")
+        else:
+            st.caption("No document transfer event was recorded for this package.")
     with checks_col:
         st.markdown(f"""<div class="sc-side-card">
             <div class="sc-section-title">What was verified</div>

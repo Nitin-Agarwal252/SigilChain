@@ -26,7 +26,8 @@ import oqs
 
 def build_record(doc_id: str, recipient_id: str, watermark_id: str,
                   marked_pdf_bytes: bytes, timestamp: int | None = None,
-                  key_version: int = 1) -> bytes:
+                  key_version: int = 1, package_id: str | None = None,
+                  transfer_event_id: str | None = None) -> bytes:
     """
     Build the deterministic byte string that gets signed. Returns raw bytes,
     not a dict — the caller signs exactly this, and a verifier must
@@ -35,6 +36,7 @@ def build_record(doc_id: str, recipient_id: str, watermark_id: str,
     if timestamp is None:
         timestamp = int(time.time())
     record = {
+        "event_type": "decryption_session",
         "doc_id": doc_id,
         "recipient_id": recipient_id,
         "key_version": key_version,
@@ -42,6 +44,10 @@ def build_record(doc_id: str, recipient_id: str, watermark_id: str,
         "timestamp": timestamp,
         "content_hash": hashlib.sha256(marked_pdf_bytes).hexdigest(),
     }
+    if package_id is not None:
+        record["package_id"] = package_id
+    if transfer_event_id is not None:
+        record["transfer_event_id"] = transfer_event_id
     return serialize_record(record)
 
 

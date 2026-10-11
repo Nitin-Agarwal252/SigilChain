@@ -149,10 +149,12 @@ def protect_local_identity(recipient_id: str, passphrase: str | None = None) -> 
     return True
 
 
-def load_identity(recipient_id: str, passphrase: str | None = None) -> dict:
-    """Load a previously generated identity (including private keys) from local disk."""
+def load_identity(recipient_id: str, passphrase: str | None = None,
+                  key_version: int | None = None) -> dict:
+    """Load a local private identity, optionally selecting a historical key version."""
     try:
-        current = lookup_identity(recipient_id)
+        current = lookup_identity(recipient_id, key_version=key_version,
+                                  allow_revoked=key_version is not None)
         path = _keys_path(recipient_id, current["key_version"])
     except (KeyError, sqlite3.Error):
         path = _keys_path(recipient_id)

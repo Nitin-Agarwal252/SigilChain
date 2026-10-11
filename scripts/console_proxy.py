@@ -53,6 +53,11 @@ async def proxy_websocket(browser):
             uri,
             origin=browser.headers.get("origin"),
             proxy=None,
+            # Streamlit can send large upload/session events over its
+            # WebSocket. The library default is 1 MiB, which closed the
+            # console connection for a ~1.2 MiB frame and cleared the UI.
+            # Keep a finite ceiling while allowing larger demo documents.
+            max_size=32 * 1024 * 1024,
         ) as upstream:
             logger.info("Streamlit upstream WebSocket connected for %s", uri)
             # Select one offered protocol. Echoing the raw header can contain

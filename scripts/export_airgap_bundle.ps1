@@ -45,6 +45,9 @@ files, or persistent database volumes. After startup, create an identity on each
 machine with `docker compose run --rm cli python agent/cli.py enroll --as RECIPIENT_ID`.
 Validator receipts use ML-DSA-65. Then pin the three validator keys after comparing their fingerprints over a trusted channel. If this upgrades a prior Ed25519 demo, the previous trust roster is saved as validator_trust.json.previous for checking older evidence:
 `docker compose run --rm cli python scripts/bootstrap_validator_trust.py --nodes http://validator1:8001,http://validator2:8002,http://validator3:8003`.
+New package files use authenticated v2 manifests: the sender signs the manifest with ML-DSA-65, and the package binds the document hash, recipient key versions, and key envelopes. For a committed onward handoff, use `transfer` with `--input` for the first sender-to-recipient hop or `--package` for each next holder; the new package is released only after the validator quorum commits the signed event. See the project README for the complete A-to-B-to-C command sequence and the limits of what a signed handoff proves.
+The staged `demo.ps1` now demonstrates a complete chain by default: `nitin` -> `ashish` -> `rahul_demo`, followed by final-recipient decryption and trace-console verification. Change the identities with `-Recipients` when needed; the final ID must be the decryptor. It creates new signed recipient packages at every handoff and waits for quorum commit before release. Every sending identity and the final decryptor must have its local private key and passphrase.
+The localhost console proxy accepts Streamlit WebSocket frames up to 32 MiB so document-analysis session updates do not disconnect at the library's 1 MiB default.
 The CLI stores local private keys under the host's `cli-data` directory; that directory is
 not part of this bundle and must remain with the recipient device.
 
