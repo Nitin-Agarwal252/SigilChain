@@ -75,6 +75,36 @@ except (OSError, json.JSONDecodeError):
 REQUIRE_TRUSTED_VALIDATORS = os.environ.get("SIGILCHAIN_REQUIRE_TRUSTED_VALIDATORS", "1").lower() not in {
     "0", "false", "no"
 }
+GOVERNANCE_ROSTER_FILE = os.environ.get(
+    "SIGILCHAIN_GOVERNANCE_ROSTER", os.path.join("trust", "governance_roster.json")
+)
+
+
+def governance_roster() -> dict:
+    """Reload the threshold-approval roster for each governance event."""
+    try:
+        with open(GOVERNANCE_ROSTER_FILE, "rb") as roster_file:
+            raw = roster_file.read()
+        expected = os.environ.get("SIGILCHAIN_GOVERNANCE_ROSTER_SHA256", "").strip().lower()
+        enforcement = os.environ.get("SIGILCHAIN_REQUIRE_GOVERNANCE_APPROVALS", "0").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if enforcement and not expected:
+            raise ValueError(
+                "governance is enabled but SIGILCHAIN_GOVERNANCE_ROSTER_SHA256 is not pinned"
+            )
+        if expected:
+            import hashlib
+            import re
+            if not re.fullmatch(r"[0-9a-f]{64}", expected):
+                raise ValueError("SIGILCHAIN_GOVERNANCE_ROSTER_SHA256 must be 64 hexadecimal characters")
+            actual = hashlib.sha256(raw).hexdigest()
+            if actual != expected:
+                raise ValueError("governance roster hash does not match SIGILCHAIN_GOVERNANCE_ROSTER_SHA256")
+        roster = json.loads(raw.decode("utf-8"))
+        return roster if isinstance(roster, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def trusted_validator_keys() -> dict:

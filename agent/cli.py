@@ -22,6 +22,17 @@ import sys
 import tempfile
 import time
 
+def _paint(message: str, code: str) -> str:
+    """Add restrained terminal color without polluting redirected output."""
+    if os.environ.get("NO_COLOR") is not None or not sys.stdout.isatty():
+        return message
+    return f"\033[{code}m{message}\033[0m"
+
+
+def _status(label: str, message: str, code: str = "36") -> None:
+    print(f"{_paint(label, code)} {message}")
+
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import config
@@ -32,7 +43,9 @@ from crypto.encrypt import encrypt_document, canonical_json
 from crypto.decrypt import decrypt_document
 from crypto.normalize_document import normalize_to_pdf
 from crypto.sign import build_record, sign_record, serialize_record, verify_record
-from crypto.transfer import build_transfer_record, sign_transfer, new_transfer_id
+from crypto.transfer import (build_transfer_record, build_acceptance_record,
+                             acceptance_event_id, sign_transfer, new_transfer_id)
+from security.runtime_assurance import (person_auth_claims, person_auth_watermark_id)
 from watermark.pdf_utils import pdf_to_grayscale_images, images_to_pdf
 if config.WATERMARK_TRANSFORM == "dwt-dct":
     from watermark.dwt_dct_watermark import embed_bits
@@ -117,18 +130,30 @@ def cmd_enroll(args):
         raise ValueError(f"Identity '{args.as_recipient}' is already registered; use rotate instead.")
     passphrase = _confirmed_passphrase("New identity passphrase: ")
     public = generate_identity(args.as_recipient, passphrase=passphrase)
-    version = register_identity(public)
+    try:
+        version = register_identity(public)
+    except PermissionError as exc:
+        print(f"Identity key is staged locally but not enrolled: {exc}")
+        return
     print(f"Enrolled {args.as_recipient} key version {version}; private key is passphrase-encrypted locally.")
 
 
 def cmd_rotate(args):
     passphrase = _confirmed_passphrase("New identity passphrase: ")
-    public = rotate_identity(args.as_recipient, passphrase=passphrase)
+    try:
+        public = rotate_identity(args.as_recipient, passphrase=passphrase)
+    except PermissionError as exc:
+        print(f"Rotation key is staged locally but not activated: {exc}")
+        return
     print(f"Rotated {args.as_recipient} to key version {public['key_version']}.")
 
 
 def cmd_revoke(args):
-    revoke_identity(args.as_recipient)
+    try:
+        revoke_identity(args.as_recipient)
+    except PermissionError as exc:
+        print(f"Identity was not revoked: {exc}")
+        return
     print(f"Revoked active identity key for {args.as_recipient}.")
 
 
@@ -144,6 +169,13 @@ def cmd_decrypt(args):
         package = json.load(f)
 
     recipient_private = load_identity(args.as_recipient)
+    auth_token = os.environ.get("SIGILCHAIN_OIDC_ID_TOKEN")
+    person_auth = None
+    if os.environ.get("SIGILCHAIN_REQUIRE_PERSON_AUTH", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        if not auth_token:
+            raise ValueError("Person authentication is required; set SIGILCHAIN_OIDC_ID_TOKEN to a fresh OIDC ID token.")
+        person_auth = person_auth_claims(auth_token, args.as_recipient)
+        person_auth["session_id"] = person_auth_watermark_id(person_auth["issuer"], person_auth["jti"])
     sender_identity = None
     if package.get("package_version") == 2:
         sender = package.get("sender") or {}
@@ -152,15 +184,33 @@ def cmd_decrypt(args):
         sender_identity = lookup_identity(sender["recipient_id"],
                                           key_version=sender.get("key_version", 1),
                                           allow_revoked=True)
-    print(f"Decrypting as '{args.as_recipient}'...")
+    _status("[1/5] DECRYPT", f"Opening the package for '{args.as_recipient}' with their local private key.")
     pdf_bytes = decrypt_document(package, args.as_recipient, recipient_private, sender_identity)
-    print(f"Decrypted: {len(pdf_bytes)} bytes")
+    _status("OK", f"Document decrypted ({len(pdf_bytes)} bytes).", "32")
 
-    print("Rasterizing pages...")
+    parent_transfer_id = (package.get("lineage") or {}).get("parent_transfer_event_id")
+    acceptance_id = None
+    nodes = args.nodes.split(",") if args.nodes else DEFAULT_NODES
+    if parent_transfer_id:
+        _status("[2/5] ACCEPT", "Checking the incoming offer and signing acceptance for this exact package.")
+        parent_record = _require_committed_parent_transfer(
+            nodes, parent_transfer_id, holder_id=args.as_recipient, document_id=args.doc_id,
+            package_id=package.get("package_id"),
+            package_sha256=hashlib.sha256(canonical_json(package)).hexdigest(),
+            document_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
+        )
+        acceptance_id = _ensure_committed_acceptance(
+            nodes, parent_record, recipient_private, document_id=args.doc_id,
+            package=package, document_bytes=pdf_bytes,
+        )
+        _status("OK", f"Recipient acceptance committed: {acceptance_id}", "32")
+
+    _status("[3/5] WATERMARK", "Converting PDF pages to images so each page can carry this session's hidden mark.")
     pages = pdf_to_grayscale_images(pdf_bytes)
-    print(f"{len(pages)} page(s)")
+    print(f"  {len(pages)} page(s) to mark")
 
-    watermark_id = generate_watermark_id()
+    watermark_id = (bytes.fromhex(person_auth["session_id"]) if person_auth
+                    else generate_watermark_id())
     encoded_payload = pack_for_embedding(watermark_id)
     bits = bytes_to_bits(encoded_payload)
     print(f"Session watermark_id: {watermark_id.hex()}")
@@ -176,7 +226,7 @@ def cmd_decrypt(args):
 
     marked_pdf_bytes = images_to_pdf(marked_pages)
 
-    print("\nBuilding and signing the decryption record...")
+    _status("[4/5] SIGN", "Binding the document, recipient, watermark, and transfer references into the session claim.")
     record_bytes = build_record(
         doc_id=args.doc_id,
         recipient_id=args.as_recipient,
@@ -185,16 +235,18 @@ def cmd_decrypt(args):
         key_version=recipient_private.get("key_version", 1),
         package_id=package.get("package_id"),
         transfer_event_id=(package.get("lineage") or {}).get("parent_transfer_event_id"),
+        handoff_acceptance_event_id=acceptance_id,
+        person_auth=person_auth,
     )
     signature = sign_record(record_bytes, recipient_private["sig_alg"],
                              bytes.fromhex(recipient_private["sig_secret"]))
 
-    nodes = args.nodes.split(",") if args.nodes else DEFAULT_NODES
-    print(f"Submitting to validator quorum: {nodes}")
+    _status("[5/5] RECORD", f"Submitting the signed session claim; {config.QUORUM_REQUIRED} validator receipts are required.")
     result = submit_to_quorum(nodes, watermark_id.hex(), record_bytes, signature,
-                               args.as_recipient, required=config.QUORUM_REQUIRED)
+                               args.as_recipient, required=config.QUORUM_REQUIRED,
+                               auth_token=auth_token if person_auth else None)
 
-    print(f"\nCommitted: {result['committed']}")
+    print(f"\n{_paint('COMMITTED' if result['committed'] else 'NOT COMMITTED', '32' if result['committed'] else '31')}: {result['committed']}")
     backends = sorted({item.get("ledger_backend") for item in result["accepted_by"]
                        if item.get("ledger_backend")})
     if backends:
@@ -223,8 +275,8 @@ def cmd_decrypt(args):
         finally:
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
-        print(f"Wrote marked PDF to {out_path}")
-        print(f"\nDone. watermark_id = {watermark_id.hex()}")
+        _status("RELEASED", f"Marked PDF written after quorum commit: {out_path}", "32")
+        _status("SESSION ID", watermark_id.hex(), "35")
         print("Keep this ID (or the marked PDF, which carries it invisibly) "
               "-- the trace console looks up exactly this.")
     else:
@@ -251,7 +303,7 @@ def _atomic_json_write(path: str, value: dict) -> None:
 
 def _require_committed_parent_transfer(nodes: list[str], event_id: str, *, holder_id: str,
                                        document_id: str, package_id: str,
-                                       package_sha256: str, document_sha256: str) -> None:
+                                       package_sha256: str, document_sha256: str) -> dict:
     """Reject a new hop unless its incoming package matches a verified prior quorum event."""
     views = check_watermark(nodes, event_id)
     groups = {}
@@ -286,8 +338,118 @@ def _require_committed_parent_transfer(nodes: list[str], event_id: str, *, holde
             and record.get("target_document_sha256") == document_sha256
         )
         if matches_package:
-            return
+            return record
     raise ValueError("Incoming package does not match a sender-signed transfer event committed by a trusted validator quorum.")
+
+
+def _ensure_committed_acceptance(nodes: list[str], transfer_record: dict, recipient_private: dict,
+                                 *, document_id: str, package: dict,
+                                 document_bytes: bytes) -> str:
+    """Commit or reuse a recipient-signed acceptance for this exact package."""
+    package_hash = hashlib.sha256(canonical_json(package)).hexdigest()
+    transfer_id = transfer_record["event_id"]
+    recipient_id = recipient_private["recipient_id"]
+    event_id = acceptance_event_id(transfer_id, recipient_id, package["package_id"], package_hash)
+
+    views = check_watermark(nodes, event_id)
+    groups = {}
+    found_any = False
+    for view in views:
+        found_any = found_any or bool(view.get("found"))
+        if not (view.get("found") and view.get("chain_valid") and view.get("validator_trusted")
+                and view.get("validator_id")):
+            continue
+        record = view.get("record") or {}
+        try:
+            identity = lookup_identity(record["recipient_id"],
+                                       key_version=record["key_version"], allow_revoked=True)
+            record_bytes = serialize_record(record)
+            signature = bytes.fromhex(view["signature_hex"])
+            if (record.get("event_type") != "handoff_acceptance"
+                    or record.get("event_id") != event_id
+                    or not verify_record(record_bytes, signature, identity["sig_alg"],
+                                         bytes.fromhex(identity["sig_public"]))):
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        key = (record_bytes.hex(), view["signature_hex"])
+        groups.setdefault(key, {"record": record, "validators": set()})["validators"].add(view["validator_id"])
+
+    expected = {
+        "transfer_event_id": transfer_id,
+        "doc_id": document_id,
+        "recipient_id": recipient_id,
+        "package_id": package["package_id"],
+        "package_sha256": package_hash,
+        "document_sha256": hashlib.sha256(document_bytes).hexdigest(),
+    }
+    for group in groups.values():
+        record = group["record"]
+        if len(group["validators"]) >= config.QUORUM_REQUIRED:
+            if all(record.get(key) == value for key, value in expected.items()):
+                return event_id
+            raise ValueError("A different acceptance record occupies this package's acceptance ID.")
+    if found_any:
+        raise ValueError("An acceptance record exists but could not be verified by a trusted validator quorum.")
+
+    record_bytes = build_acceptance_record(
+        acceptance_id=event_id, transfer_id=transfer_id, document_id=document_id,
+        recipient=recipient_private, package_id=package["package_id"],
+        package_sha256=package_hash,
+        document_sha256=hashlib.sha256(document_bytes).hexdigest(),
+    )
+    signature = sign_transfer(record_bytes, recipient_private)
+    result = submit_to_quorum(nodes, event_id, record_bytes, signature, recipient_id,
+                              required=config.QUORUM_REQUIRED)
+    if not result["committed"]:
+        raise RuntimeError("Recipient acceptance did not reach the configured validator quorum.")
+    return event_id
+
+
+def _commit_marked_holder_copy(*, nodes: list[str], document_id: str, recipient_id: str,
+                               recipient_private: dict, package: dict, document_bytes: bytes,
+                               acceptance_id: str, out_dir: str) -> str:
+    """Give an onward-forwarding holder their own marked, quorum-recorded PDF."""
+    print(f"Creating a recipient-specific marked copy for {recipient_id}...")
+    pages = pdf_to_grayscale_images(document_bytes)
+    watermark_id = generate_watermark_id()
+    bits = bytes_to_bits(pack_for_embedding(watermark_id))
+    marked_pages = []
+    for index, page in enumerate(pages):
+        marked = embed_bits(page.astype(float), bits, delta=EMBED_DELTA, repeat=EMBED_REPEAT)
+        marked_pages.append(marked.clip(0, 255).astype("uint8"))
+        print(f"  holder page {index + 1}/{len(pages)} marked")
+    marked_pdf = images_to_pdf(marked_pages)
+    record_bytes = build_record(
+        doc_id=document_id, recipient_id=recipient_id, watermark_id=watermark_id.hex(),
+        marked_pdf_bytes=marked_pdf, key_version=recipient_private.get("key_version", 1),
+        package_id=package.get("package_id"),
+        transfer_event_id=(package.get("lineage") or {}).get("parent_transfer_event_id"),
+        handoff_acceptance_event_id=acceptance_id,
+    )
+    signature = sign_record(record_bytes, recipient_private["sig_alg"],
+                            bytes.fromhex(recipient_private["sig_secret"]))
+    result = submit_to_quorum(nodes, watermark_id.hex(), record_bytes, signature,
+                              recipient_id, required=config.QUORUM_REQUIRED)
+    if not result["committed"]:
+        raise RuntimeError("Holder's marked session did not reach validator quorum; no marked PDF was released.")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{document_id}_{recipient_id}_{watermark_id.hex()[:12]}.pdf")
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", delete=False, dir=out_dir,
+                                         prefix=".sigilchain-holder-") as output:
+            temp_path = output.name
+            output.write(marked_pdf)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temp_path, out_path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+    print(f"Holder session committed: {watermark_id.hex()}")
+    print(f"Wrote this recipient's marked copy to {out_path}")
+    return watermark_id.hex()
 
 
 def cmd_transfer(args):
@@ -298,6 +460,7 @@ def cmd_transfer(args):
     source_package_id = None
     source_package_hash = None
     parent_transfer_id = None
+    parent_acceptance_id = None
     nodes = args.nodes.split(",") if args.nodes else DEFAULT_NODES
 
     if args.package:
@@ -318,10 +481,22 @@ def cmd_transfer(args):
         document_bytes = decrypt_document(source_package, args.from_id, holder_private, sender_registry)
         parent_transfer_id = (source_package.get("lineage") or {}).get("parent_transfer_event_id")
         if parent_transfer_id:
-            _require_committed_parent_transfer(
+            parent_record = _require_committed_parent_transfer(
                 nodes, parent_transfer_id, holder_id=args.from_id, document_id=args.doc_id,
                 package_id=source_package_id, package_sha256=source_package_hash,
                 document_sha256=hashlib.sha256(document_bytes).hexdigest(),
+            )
+            parent_acceptance_id = _ensure_committed_acceptance(
+                nodes, parent_record, sender_private, document_id=args.doc_id,
+                package=source_package, document_bytes=document_bytes,
+            )
+            session_dir = (args.session_out_dir or
+                           os.path.join(os.path.dirname(os.path.abspath(args.out)), "decrypted"))
+            _commit_marked_holder_copy(
+                nodes=nodes, document_id=args.doc_id, recipient_id=args.from_id,
+                recipient_private=sender_private, package=source_package,
+                document_bytes=document_bytes, acceptance_id=parent_acceptance_id,
+                out_dir=session_dir,
             )
     else:
         document_bytes = normalize_to_pdf(args.input_file)
@@ -330,6 +505,7 @@ def cmd_transfer(args):
     target_package = encrypt_document(
         document_bytes, {args.to_id: recipient}, sender_id=args.from_id,
         sender_identity=sender_private, parent_transfer_event_id=transfer_id,
+        parent_acceptance_event_id=parent_acceptance_id,
     )
     record_bytes = build_transfer_record(
         transfer_id=transfer_id, document_id=args.doc_id,
@@ -339,19 +515,23 @@ def cmd_transfer(args):
         source_document_sha256=hashlib.sha256(document_bytes).hexdigest(),
         target_package=target_package,
         parent_transfer_event_id=parent_transfer_id,
+        parent_acceptance_event_id=parent_acceptance_id,
     )
     signature = sign_transfer(record_bytes, sender_private)
-    print(f"Recording handoff {args.from_id} -> {args.to_id} in validator quorum...")
+    _status("[TRANSFER]", f"Recording signed offer {args.from_id} -> {args.to_id}; package release waits for quorum.")
     result = submit_to_quorum(nodes, transfer_id, record_bytes, signature,
                               args.from_id, required=config.QUORUM_REQUIRED)
-    print(f"Committed: {result['committed']}")
+    print(f"{_paint('COMMITTED' if result['committed'] else 'NOT COMMITTED', '32' if result['committed'] else '31')}: {result['committed']}")
     print(f"Accepted by: {[entry['url'] for entry in result['accepted_by']]}")
     if not result["committed"]:
         raise RuntimeError("Handoff did not reach the configured validator quorum; target package was not released.")
     _atomic_json_write(args.out, target_package)
-    print(f"Wrote recipient package to {args.out}")
+    _status("RELEASED", f"Recipient package written after quorum commit: {args.out}", "32")
     print(f"Transfer event ID: {transfer_id}")
-    print("This records a signed handoff claim; it does not prove the file was physically delivered or opened.")
+    if parent_acceptance_id:
+        print(f"Incoming package acceptance: {parent_acceptance_id}")
+    _status("WHAT THIS MEANS", "The receiver's acceptance is recorded when they decrypt or forward the package.", "36")
+    _status("LIMIT", "Key signatures do not prove human identity, physical delivery, or who leaked the file.", "33")
 
 
 def main():
@@ -413,6 +593,8 @@ def main():
     p_transfer.add_argument("--to", dest="to_id", required=True, help="Next recipient's enrolled identity")
     p_transfer.add_argument("--doc-id", required=True, help="Stable document identifier used in the transfer trail")
     p_transfer.add_argument("--out", default="transfer-package.json", help="Path for the next recipient's package")
+    p_transfer.add_argument("--session-out-dir", default=None,
+                            help="Directory for this holder's marked copy (default: decrypted beside --out)")
     p_transfer.add_argument("--nodes", default=None,
                             help="Comma-separated validator node URLs (default: localhost:8001-8003)")
     p_transfer.set_defaults(func=cmd_transfer)

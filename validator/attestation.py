@@ -91,7 +91,32 @@ def public_key_hex(key: ValidatorSigningKey) -> str:
     return key.public_key.hex()
 
 
-def make_receipt(key: ValidatorSigningKey, validator_id: str, entry: dict) -> dict:
+def sign_attestation(key: ValidatorSigningKey, statement: dict) -> str:
+    """Sign a canonical operational statement with this validator's key."""
+    message = canonical_json(statement)
+    with oqs.Signature(key.sig_alg, secret_key=key.secret_key) as signer:
+        return signer.sign(message).hex()
+
+
+def verify_attestation(statement: dict, signature_hex: str, public_key_hex_value: str,
+                       sig_alg: str = VALIDATOR_SIG_ALG) -> bool:
+    try:
+        message = canonical_json(statement)
+        signature, public_key = bytes.fromhex(signature_hex), bytes.fromhex(public_key_hex_value)
+        if sig_alg == LEGACY_SIG_ALG:
+            Ed25519PublicKey.from_public_bytes(public_key).verify(signature, message)
+            return True
+        if sig_alg == VALIDATOR_SIG_ALG:
+            with oqs.Signature(sig_alg) as verifier:
+                return bool(verifier.verify(message, signature, public_key))
+        return False
+    except Exception:
+        return False
+
+
+def make_receipt(key: ValidatorSigningKey, validator_id: str, entry: dict,
+                 machine_attestation: dict | None = None,
+                 person_auth_verification: dict | None = None) -> dict:
     receipt = {
         "validator_id": validator_id,
         "validator_sig_alg": key.sig_alg,
@@ -105,6 +130,12 @@ def make_receipt(key: ValidatorSigningKey, validator_id: str, entry: dict) -> di
         "record_hash": hashlib.sha256(entry["record_json"].encode("utf-8")).hexdigest(),
         "signature_hash": hashlib.sha256(bytes.fromhex(entry["signature_hex"])).hexdigest(),
     }
+    if machine_attestation is not None:
+        # Covered by this validator's receipt signature so evidence can show
+        # which external TPM-verifier decision was checked before the commit.
+        receipt["machine_attestation"] = machine_attestation
+    if person_auth_verification is not None:
+        receipt["person_auth_verification"] = person_auth_verification
     with oqs.Signature(key.sig_alg, secret_key=key.secret_key) as signer:
         signature = signer.sign(canonical_json(receipt))
     return {

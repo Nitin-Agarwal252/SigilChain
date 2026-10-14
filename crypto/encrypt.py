@@ -83,7 +83,8 @@ def verify_package_signature(package: dict, sender_identity: dict | None) -> boo
 
 def encrypt_document(document_bytes: bytes, recipients: dict, *, sender_id: str | None = None,
                      sender_identity: dict | None = None, package_id: str | None = None,
-                     parent_transfer_event_id: str | None = None) -> dict:
+                     parent_transfer_event_id: str | None = None,
+                     parent_acceptance_event_id: str | None = None) -> dict:
     """Encrypt a document once and wrap its content key for every recipient.
 
     ``sender_identity`` is a locally loaded private identity. When supplied,
@@ -116,7 +117,8 @@ def encrypt_document(document_bytes: bytes, recipients: dict, *, sender_id: str 
         "document_sha256": hashlib.sha256(document_bytes).hexdigest(),
         "recipients": recipient_meta,
         "sender": sender,
-        "lineage": {"parent_transfer_event_id": parent_transfer_event_id},
+        "lineage": {"parent_transfer_event_id": parent_transfer_event_id,
+                    "parent_acceptance_event_id": parent_acceptance_event_id},
     }
 
     content_key = AESGCM.generate_key(bit_length=256)

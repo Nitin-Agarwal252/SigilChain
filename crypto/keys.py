@@ -26,6 +26,7 @@ import time
 import oqs
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+from crypto.governance import make_action, require_approval
 
 KEM_ALG = "ML-KEM-768"    # NIST security level ~3, matches AES-256 strength
 SIG_ALG = "ML-DSA-65"     # NIST security level ~3, paired balance with the KEM
@@ -95,19 +96,25 @@ def _protect_private_record(record: dict, passphrase: str) -> dict:
     key = Scrypt(salt=salt, length=32, n=2**14, r=8, p=1).derive(passphrase.encode("utf-8"))
     aad = f"sigilchain-private-key-v1:{record['recipient_id']}".encode("utf-8")
     plaintext = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return {
+    protected = {
         "format": "sigilchain-encrypted-private-key-v1",
         "recipient_id": record["recipient_id"],
         "key_version": record.get("key_version", 1),
-        "kem_alg": record["kem_alg"],
         "sig_alg": record["sig_alg"],
-        "kem_public": record["kem_public"],
         "sig_public": record["sig_public"],
         "kdf": "scrypt-n16384-r8-p1",
         "salt": salt.hex(),
         "nonce": nonce.hex(),
         "encrypted_private": AESGCM(key).encrypt(nonce, plaintext, aad).hex(),
     }
+    # Recipient identities carry both KEM and signature metadata. Governance
+    # signers are signing-only keys and intentionally have no KEM material.
+    # Retain every optional algorithm/public-key field present in the record so
+    # the same encrypted envelope supports both without inventing fake fields.
+    for field in ("kem_alg", "kem_public"):
+        if field in record:
+            protected[field] = record[field]
+    return protected
 
 
 def _write_private_record(path: str, record: dict) -> None:
@@ -225,8 +232,11 @@ def init_registry(db_path: str = REGISTRY_DB) -> None:
     conn.close()
 
 
-def register_identity(public_record: dict, db_path: str = REGISTRY_DB) -> int:
+def register_identity(public_record: dict, db_path: str = REGISTRY_DB,
+                      approval_bundle: dict | None = None) -> int:
     """Register the first public key for an identity; never replace it silently."""
+    action = make_action("identity.enroll", {"identity": public_record})
+    require_approval(action, approval_bundle)
     init_registry(db_path)
     conn = sqlite3.connect(db_path)
     existing = conn.execute(
@@ -294,17 +304,86 @@ def lookup_identity(recipient_id: str, db_path: str = REGISTRY_DB,
     }
 
 
-def rotate_identity(recipient_id: str, passphrase: str | None = None,
-                    db_path: str = REGISTRY_DB) -> dict:
-    """Replace the active key version while retaining old public keys for audits."""
+def _apply_rotation_record(public_record: dict, db_path: str = REGISTRY_DB,
+                           approval_bundle: dict | None = None) -> dict:
+    """Activate an already staged rotation key after its exact action is approved."""
+    recipient_id = public_record["recipient_id"]
     current = lookup_identity(recipient_id, db_path=db_path, allow_revoked=True)
+    if (public_record.get("key_version") == current["key_version"]
+            and public_record.get("kem_public") == current["kem_public"]
+            and public_record.get("sig_public") == current["sig_public"]
+            and current.get("revoked_at") is None):
+        action = make_action("identity.rotate", {"identity": public_record,
+                                                   "previous_key_version": current["key_version"] - 1})
+        require_approval(action, approval_bundle)
+        return dict(public_record)
+    version = current["key_version"] + 1
+    expected = {"recipient_id": recipient_id, "kem_alg": KEM_ALG, "sig_alg": SIG_ALG,
+                "kem_public": public_record["kem_public"], "sig_public": public_record["sig_public"],
+                "key_version": version}
+    if public_record != expected:
+        raise ValueError("Rotation proposal does not match the expected active identity version or algorithms")
+    new_key_path = _keys_path(recipient_id, version)
+    if not os.path.isfile(new_key_path):
+        raise FileNotFoundError(f"Staged private rotation key is missing: {new_key_path}")
+    with open(new_key_path, encoding="utf-8") as stream:
+        staged = json.load(stream)
+    if staged.get("format") == "sigilchain-encrypted-private-key-v1":
+        if (staged.get("recipient_id") != recipient_id
+                or staged.get("key_version") != version
+                or staged.get("kem_public") != public_record["kem_public"]
+                or staged.get("sig_public") != public_record["sig_public"]):
+            raise ValueError("Staged encrypted private key does not match the approved public rotation key")
+    elif (staged.get("recipient_id") != recipient_id
+          or staged.get("key_version") != version
+          or staged.get("kem_public") != public_record["kem_public"]
+          or staged.get("sig_public") != public_record["sig_public"]):
+        raise ValueError("Staged private key does not match the approved public rotation key")
+
+    action = make_action("identity.rotate", {"identity": public_record,
+                                               "previous_key_version": current["key_version"]})
+    require_approval(action, approval_bundle)
+    now = int(time.time())
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE identity_history SET revoked_at = ? WHERE recipient_id = ? AND key_version = ?",
+                     (now, recipient_id, current["key_version"]))
+        conn.execute(
+            "INSERT INTO identity_history (recipient_id,key_version,kem_alg,sig_alg,kem_public,sig_public,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (recipient_id, version, KEM_ALG, SIG_ALG,
+             public_record["kem_public"], public_record["sig_public"], now),
+        )
+        conn.execute(
+            "UPDATE identities SET kem_alg=?,sig_alg=?,kem_public=?,sig_public=?,key_version=?,revoked_at=NULL "
+            "WHERE recipient_id=?",
+            (KEM_ALG, SIG_ALG, public_record["kem_public"], public_record["sig_public"], version, recipient_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return dict(public_record)
+
+
+def rotate_identity(recipient_id: str, passphrase: str | None = None,
+                    db_path: str = REGISTRY_DB,
+                    approval_bundle: dict | None = None) -> dict:
+    """Stage a new key, then activate it only when its exact change is approved."""
+    current = lookup_identity(recipient_id, db_path=db_path, allow_revoked=True)
+    version = current["key_version"] + 1
+    new_key_path = _keys_path(recipient_id, version)
+    if os.path.exists(new_key_path):
+        raise FileExistsError(f"Staged key already exists at {new_key_path}; inspect it before retrying.")
     with oqs.KeyEncapsulation(KEM_ALG) as kem:
         kem_public = kem.generate_keypair()
         kem_secret = kem.export_secret_key()
     with oqs.Signature(SIG_ALG) as sig:
         sig_public = sig.generate_keypair()
         sig_secret = sig.export_secret_key()
-    version = current["key_version"] + 1
     private_record = {
         "recipient_id": recipient_id, "key_version": version,
         "kem_alg": KEM_ALG, "sig_alg": SIG_ALG,
@@ -315,37 +394,21 @@ def rotate_identity(recipient_id: str, passphrase: str | None = None,
     if passphrase is not None and len(passphrase) < 12:
         raise ValueError("Passphrase must contain at least 12 characters.")
     stored = _protect_private_record(private_record, passphrase) if passphrase else private_record
-    now = int(time.time())
-    new_key_path = _keys_path(recipient_id, version)
     _write_private_record(new_key_path, stored)
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("UPDATE identity_history SET revoked_at = ? WHERE recipient_id = ? AND key_version = ?",
-                     (now, recipient_id, current["key_version"]))
-        conn.execute(
-            "INSERT INTO identity_history (recipient_id,key_version,kem_alg,sig_alg,kem_public,sig_public,created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (recipient_id, version, KEM_ALG, SIG_ALG, kem_public.hex(), sig_public.hex(), now),
-        )
-        conn.execute(
-            "UPDATE identities SET kem_alg=?,sig_alg=?,kem_public=?,sig_public=?,key_version=?,revoked_at=NULL "
-            "WHERE recipient_id=?",
-            (KEM_ALG, SIG_ALG, kem_public.hex(), sig_public.hex(), version, recipient_id),
-        )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        if os.path.exists(new_key_path):
-            os.remove(new_key_path)
-        raise
-    finally:
-        conn.close()
-    return {k: v for k, v in private_record.items() if k not in {"kem_secret", "sig_secret"}}
+    public_record = {key: value for key, value in private_record.items()
+                     if key not in {"kem_secret", "sig_secret"}}
+    return _apply_rotation_record(public_record, db_path, approval_bundle)
 
 
-def revoke_identity(recipient_id: str, db_path: str = REGISTRY_DB) -> None:
+def revoke_identity(recipient_id: str, db_path: str = REGISTRY_DB,
+                    approval_bundle: dict | None = None) -> None:
     """Revoke the active public key; historical public keys remain queryable for audits."""
+    current = lookup_identity(recipient_id, db_path=db_path, allow_revoked=True)
+    action = make_action("identity.revoke", {"recipient_id": recipient_id,
+                                              "key_version": current["key_version"]})
+    require_approval(action, approval_bundle)
+    if current["revoked_at"] is not None:
+        return
     init_registry(db_path)
     now = int(time.time())
     conn = sqlite3.connect(db_path)

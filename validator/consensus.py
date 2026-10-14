@@ -90,6 +90,15 @@ def get_by_watermark_id(watermark_id: str) -> dict | None:
     return json.loads(item[1]) if item else None
 
 
+def list_entries() -> list[dict]:
+    """Return the ordered event log for narrow, client-verified audit queries."""
+    end = _prefix_end(ENTRY_PREFIX)
+    data = _request("/v3/kv/range", {"key": _b64(ENTRY_PREFIX.encode()),
+                                      "range_end": _b64(end.encode())})
+    entries = [json.loads(_decode_kv(kv)[1]) for kv in data.get("kvs", [])]
+    return sorted(entries, key=lambda item: int(item.get("id", 0)))
+
+
 def find_by_watermark_id(watermark_id: str) -> dict | None:
     return get_by_watermark_id(watermark_id)
 

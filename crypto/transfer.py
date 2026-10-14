@@ -13,6 +13,7 @@ def build_transfer_record(*, transfer_id: str, document_id: str, sender: dict,
                           source_package_sha256: str | None,
                           source_document_sha256: str,
                           target_package: dict, parent_transfer_event_id: str | None,
+                          parent_acceptance_event_id: str | None = None,
                           timestamp: int | None = None) -> bytes:
     """Create a canonical, sender-signed outgoing-handoff event."""
     if timestamp is None:
@@ -35,9 +36,38 @@ def build_transfer_record(*, transfer_id: str, document_id: str, sender: dict,
         "target_package_id": target_package["package_id"],
         "target_package_sha256": hashlib.sha256(canonical_json(target_package)).hexdigest(),
         "parent_transfer_event_id": parent_transfer_event_id,
+        "parent_acceptance_event_id": parent_acceptance_event_id,
         "timestamp": timestamp,
     }
     return canonical_json(record)
+
+
+def acceptance_event_id(transfer_id: str, recipient_id: str, package_id: str,
+                        package_sha256: str) -> str:
+    """Stable lookup ID for one recipient's acceptance of one exact package."""
+    material = "\0".join(("sigilchain/handoff-acceptance/v1", transfer_id,
+                           recipient_id, package_id, package_sha256)).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:32]
+
+
+def build_acceptance_record(*, acceptance_id: str, transfer_id: str, document_id: str,
+                            recipient: dict, package_id: str, package_sha256: str,
+                            document_sha256: str, timestamp: int | None = None) -> bytes:
+    """Create a recipient-key-signed acknowledgment for the exact received package."""
+    if timestamp is None:
+        timestamp = int(time.time())
+    return canonical_json({
+        "event_type": "handoff_acceptance",
+        "event_id": acceptance_id,
+        "transfer_event_id": transfer_id,
+        "doc_id": document_id,
+        "recipient_id": recipient["recipient_id"],
+        "key_version": int(recipient.get("key_version", 1)),
+        "package_id": package_id,
+        "package_sha256": package_sha256,
+        "document_sha256": document_sha256,
+        "timestamp": timestamp,
+    })
 
 
 def sign_transfer(record_bytes: bytes, sender_private: dict) -> bytes:

@@ -184,6 +184,32 @@ def get_chain_proof(db_path: str, watermark_id: str) -> list[dict] | None:
     ]
 
 
+def list_entries(db_path: str) -> list[dict]:
+    """Return all committed events in their canonical ledger order."""
+    if consensus.enabled():
+        return consensus.list_entries()
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT id, watermark_id, record_json, signature_hex, prev_hash, entry_hash, committed_at "
+        "FROM ledger ORDER BY id ASC"
+    ).fetchall()
+    conn.close()
+    return [{"id": row[0], "watermark_id": row[1], "record_json": row[2],
+             "signature_hex": row[3], "prev_hash": row[4], "entry_hash": row[5],
+             "committed_at": row[6], "ledger_backend": "local-sqlite"} for row in rows]
+
+
+def chain_head(db_path: str) -> dict:
+    """Return the current sequence/hash pair used by portable checkpoints."""
+    entries = list_entries(db_path)
+    if not entries:
+        return {"sequence": 0, "entry_hash": GENESIS_HASH,
+                "ledger_backend": "etcd-raft" if consensus.enabled() else "local-sqlite"}
+    last = entries[-1]
+    return {"sequence": int(last["id"]), "entry_hash": last["entry_hash"],
+            "ledger_backend": last.get("ledger_backend", "local-sqlite")}
+
+
 def find_by_watermark_id(db_path: str, watermark_id: str) -> dict | None:
     """Return an existing entry, allowing idempotent record submissions."""
     if consensus.enabled():
@@ -191,6 +217,32 @@ def find_by_watermark_id(db_path: str, watermark_id: str) -> dict | None:
         if committed is not None:
             return committed
     return get_by_watermark_id(db_path, watermark_id)
+
+
+def list_transfer_children(db_path: str, parent_transfer_event_id: str) -> list[dict]:
+    """List transfer events directly branching from a given transfer event."""
+    if consensus.enabled():
+        entries = consensus.list_entries()
+    else:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT id,watermark_id,record_json,signature_hex,prev_hash,entry_hash,committed_at "
+            "FROM ledger ORDER BY id ASC"
+        ).fetchall()
+        conn.close()
+        entries = [{"id": row[0], "watermark_id": row[1], "record_json": row[2],
+                    "signature_hex": row[3], "prev_hash": row[4],
+                    "entry_hash": row[5], "committed_at": row[6]} for row in rows]
+    matches = []
+    for entry in entries:
+        try:
+            record = json.loads(entry["record_json"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (record.get("event_type") == "document_transfer"
+                and record.get("parent_transfer_event_id") == parent_transfer_event_id):
+            matches.append({"event_id": entry["watermark_id"]})
+    return matches
 
 
 def verify_chain_integrity(db_path: str) -> tuple[bool, str]:
@@ -208,17 +260,22 @@ def verify_chain_integrity(db_path: str) -> tuple[bool, str]:
 
     conn = sqlite3.connect(db_path)
     rows = conn.execute(
-        "SELECT record_json, signature_hex, prev_hash, entry_hash FROM ledger ORDER BY id ASC"
+        "SELECT id, record_json, signature_hex, prev_hash, entry_hash FROM ledger ORDER BY id ASC"
     ).fetchall()
     conn.close()
 
     expected_prev = GENESIS_HASH
-    for i, (record_json, signature_hex, prev_hash, entry_hash) in enumerate(rows):
+    for i, (sequence, record_json, signature_hex, prev_hash, entry_hash) in enumerate(rows, start=1):
+        if sequence != i:
+            return False, f"entry {i}: sequence number is {sequence}, expected {i}"
         if prev_hash != expected_prev:
             return False, f"entry {i}: prev_hash doesn't match previous entry's hash (chain broken or reordered)"
-        recomputed = hashlib.sha256(
-            prev_hash.encode() + record_json.encode("utf-8") + bytes.fromhex(signature_hex)
-        ).hexdigest()
+        try:
+            recomputed = hashlib.sha256(
+                prev_hash.encode() + record_json.encode("utf-8") + bytes.fromhex(signature_hex)
+            ).hexdigest()
+        except (AttributeError, TypeError, ValueError):
+            return False, f"entry {i}: record or signature bytes are malformed"
         if recomputed != entry_hash:
             return False, f"entry {i}: entry_hash doesn't match its own content (record was tampered with)"
         expected_prev = entry_hash

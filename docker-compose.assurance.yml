@@ -1,0 +1,16 @@
+# Optional network attachment for a separately hosted TPM verifier.
+# Create the named Docker network and route it to a verifier on an independent
+# machine before starting with this override. The base offline demo stays on
+# its internal-only network.
+services:
+  validator1:
+    networks: [sigilchain, tpm_verifier]
+  validator2:
+    networks: [sigilchain, tpm_verifier]
+  validator3:
+    networks: [sigilchain, tpm_verifier]
+
+networks:
+  tpm_verifier:
+    name: sigilchain-tpm-verifier
+    external: true

@@ -22,7 +22,8 @@ from crypto.keys import generate_identity, register_identity, lookup_identity, l
 from crypto.encrypt import encrypt_document, canonical_json
 from crypto.decrypt import decrypt_document
 from crypto.sign import build_record, sign_record, verify_record, parse_record
-from crypto.transfer import build_transfer_record, sign_transfer, new_transfer_id
+from crypto.transfer import (build_transfer_record, build_acceptance_record,
+                             acceptance_event_id, sign_transfer, new_transfer_id)
 
 
 def ensure_identity(recipient_id: str) -> dict:
@@ -103,6 +104,38 @@ def main():
     print(f"Signed transfer event verifies for {parse_record(transfer_record)['from_id']} -> "
           f"{parse_record(transfer_record)['to_id']}: {transfer_valid}")
 
+    print("\n=== Recipient acceptance and branched handoff checks ===")
+    target_hash = hashlib.sha256(canonical_json(transfer_package)).hexdigest()
+    acceptance_id = acceptance_event_id(transfer_id, "ashish", transfer_package["package_id"], target_hash)
+    ashish_private = load_identity("ashish")
+    acceptance_bytes = build_acceptance_record(
+        acceptance_id=acceptance_id, transfer_id=transfer_id,
+        document_id="briefing-001", recipient=ashish_private,
+        package_id=transfer_package["package_id"], package_sha256=target_hash,
+        document_sha256=hashlib.sha256(fake_pdf).hexdigest(),
+    )
+    acceptance_signature = sign_transfer(acceptance_bytes, ashish_private)
+    acceptance_valid = verify_record(acceptance_bytes, acceptance_signature, ashish_pub["sig_alg"],
+                                     bytes.fromhex(ashish_pub["sig_public"]))
+    branched_package = encrypt_document(
+        fake_pdf, {"nitin": nitin_pub}, sender_id="ashish", sender_identity=ashish_private,
+        parent_transfer_event_id=transfer_id,
+        parent_acceptance_event_id=acceptance_id,
+    )
+    branch_record = build_transfer_record(
+        transfer_id=new_transfer_id(), document_id="briefing-001", sender=ashish_private,
+        recipient=nitin_pub, source_package_id=transfer_package["package_id"],
+        source_package_sha256=target_hash,
+        source_document_sha256=hashlib.sha256(fake_pdf).hexdigest(),
+        target_package=branched_package, parent_transfer_event_id=transfer_id,
+        parent_acceptance_event_id=acceptance_id,
+    )
+    branch_fields = parse_record(branch_record)
+    branch_valid = verify_record(branch_record, sign_transfer(branch_record, ashish_private),
+                                  ashish_pub["sig_alg"], bytes.fromhex(ashish_pub["sig_public"]))
+    print(f"Recipient acceptance signature verifies: {acceptance_valid}")
+    print(f"Child transfer links to accepted parent: {branch_valid and branch_fields['parent_acceptance_event_id'] == acceptance_id}")
+
     # A recipient who was never sent an envelope should be rejected cleanly
     print("\n=== Part 3: Confirming a non-recipient is correctly rejected ===")
     try:
@@ -136,6 +169,7 @@ def main():
     all_ok = (nitin_ok and ashish_ok and rejection_ok and valid and not tampered_valid
               and package_version_ok and manifest_tamper_rejected and ciphertext_tamper_rejected)
     all_ok = all_ok and transfer_valid
+    all_ok = all_ok and acceptance_valid and branch_valid
     if all_ok:
         print("Parts 2, 3 (crypto), and 4 all working: encrypt/distribute, "
               "per-recipient decrypt, and sign/verify all check out.")

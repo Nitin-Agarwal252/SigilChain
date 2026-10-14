@@ -11,10 +11,13 @@ Raft's 2-of-3 crash-fault commit quorum.
 
 import hashlib
 import json
+import os
 import httpx
 
 import config
 from validator.attestation import verify_receipt
+from crypto.governance import build_governance_event, canonical_json
+from security.runtime_assurance import verify_tpm_receipt
 
 
 def _validate_receipt(data: dict, watermark_id: str, entry_hash: str | None = None) -> tuple[bool, str]:
@@ -46,11 +49,33 @@ def _validate_receipt(data: dict, watermark_id: str, entry_hash: str | None = No
         if receipt.get("signature_hash") != signature_hash:
             return False, "validator receipt does not bind the returned recipient signature"
     if isinstance(data.get("record"), dict):
-        record_bytes = json.dumps(data["record"], sort_keys=True, separators=(",", ":")).encode("utf-8")
+        record_bytes = (canonical_json(data["record"])
+                        if data["record"].get("event_type") == "governance_change"
+                        else json.dumps(data["record"], sort_keys=True,
+                                        separators=(",", ":")).encode("utf-8"))
         if receipt.get("record_hash") != hashlib.sha256(record_bytes).hexdigest():
             return False, "validator receipt does not bind the returned record"
     if not verify_receipt(receipt, data.get("receipt_signature_hex", ""), public_key, sig_alg):
         return False, "validator receipt signature is invalid"
+    record = data.get("record")
+    person_auth = record.get("person_auth") if isinstance(record, dict) else None
+    if person_auth is not None:
+        auth_result = receipt.get("person_auth_verification")
+        if (not isinstance(auth_result, dict)
+                or any(auth_result.get(field) != person_auth.get(field)
+                       for field in ("issuer", "subject", "jti", "auth_time", "recipient_id"))
+                or not isinstance(auth_result.get("verified_at"), int)
+                or isinstance(auth_result.get("verified_at"), bool)):
+            return False, "validator receipt does not attest matching person-auth token validation"
+    require_tpm = os.environ.get("SIGILCHAIN_REQUIRE_TPM_ATTESTATION", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if require_tpm:
+        machine = receipt.get("machine_attestation")
+        verifier_key = os.environ.get("SIGILCHAIN_TPM_VERIFIER_PUBLIC_KEY", "").strip()
+        if not isinstance(machine, dict) or not verifier_key or not verify_tpm_receipt(
+                machine, verifier_key, validator_id):
+            return False, "validator receipt has no valid TPM verifier signature under the pinned key"
     return True, "verified"
 
 
@@ -65,7 +90,7 @@ def _headers() -> dict:
 
 def submit_to_quorum(node_urls: list[str], watermark_id: str, record_bytes: bytes,
                       signature: bytes, recipient_id: str, required: int = 2,
-                      timeout: float = 5.0) -> dict:
+                      timeout: float = 5.0, auth_token: str | None = None) -> dict:
     """
     POSTs the record to every node in node_urls. Returns a summary dict:
     {
@@ -81,6 +106,8 @@ def submit_to_quorum(node_urls: list[str], watermark_id: str, record_bytes: byte
         "signature_hex": signature.hex(),
         "recipient_id": recipient_id,
     }
+    if auth_token is not None:
+        payload["auth_token"] = auth_token
 
     accepted_by, rejected_by, unreachable = [], [], []
 
@@ -118,6 +145,14 @@ def submit_to_quorum(node_urls: list[str], watermark_id: str, record_bytes: byte
         "rejected_by": rejected_by,
         "unreachable": unreachable,
     }
+
+
+def submit_governance_change(node_urls: list[str], action: dict, approvals: dict,
+                            required: int = 2, timeout: float = 5.0) -> dict:
+    """Commit a threshold-signed administrator action before local application."""
+    event = build_governance_event(action, approvals)
+    return submit_to_quorum(node_urls, event["event_id"], canonical_json(event),
+                            b"", "__governance__", required=required, timeout=timeout)
 
 
 def check_watermark(node_urls: list[str], watermark_id: str, timeout: float = 5.0) -> list[dict]:
@@ -169,6 +204,29 @@ def check_watermark(node_urls: list[str], watermark_id: str, timeout: float = 5.
         except httpx.HTTPError as e:
             results.append({"url": url, "found": False, "error": str(e)})
     return results
+
+
+def list_transfer_children(node_urls: list[str], parent_transfer_event_id: str,
+                           timeout: float = 5.0) -> list[str]:
+    """Collect candidate branch IDs; callers must verify each event and its quorum."""
+    children = set()
+    for url in node_urls:
+        try:
+            response = httpx.get(
+                f"{url.rstrip('/')}/transfer-children/{parent_transfer_event_id}",
+                headers=_headers(), timeout=timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("parent_transfer_event_id") != parent_transfer_event_id:
+                continue
+            for item in payload.get("children", []):
+                event_id = item.get("event_id") if isinstance(item, dict) else None
+                if isinstance(event_id, str) and len(event_id) == 32:
+                    children.add(event_id)
+        except (httpx.HTTPError, ValueError, TypeError):
+            continue
+    return sorted(children)
 
 
 def verify_chain_proof(entries: list[dict], watermark_id: str) -> bool:

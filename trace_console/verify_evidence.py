@@ -14,17 +14,21 @@ import os
 import sqlite3
 import sys
 
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from agent.quorum_client import verify_chain_proof
 from crypto.keys import lookup_identity
 from crypto.sign import serialize_record, verify_record
+from crypto.transfer import acceptance_event_id
 from validator.attestation import verify_receipt
+from security.runtime_assurance import verify_tpm_receipt
 import config
 
 
 def verify_bundle(bundle: dict, identity_db: str | None = None,
-                  validator_trust_file: str | None = None) -> tuple[bool, list[str]]:
+                  validator_trust_file: str | None = None,
+                  tpm_verifier_key: str | None = None) -> tuple[bool, list[str]]:
     errors = []
     try:
         record = bundle["record"]
@@ -104,6 +108,21 @@ def verify_bundle(bundle: dict, identity_db: str | None = None,
         if not verify_receipt(receipt, item.get("receipt_signature_hex", ""),
                               validator_key, validator_sig_alg):
             continue
+        machine = receipt.get("machine_attestation")
+        if tpm_verifier_key and not machine:
+            continue
+        if tpm_verifier_key and machine:
+            if not verify_tpm_receipt(machine, tpm_verifier_key, node_id):
+                continue
+        person_auth = record.get("person_auth")
+        if person_auth is not None:
+            auth_receipt = receipt.get("person_auth_verification")
+            if (not isinstance(person_auth, dict) or not isinstance(auth_receipt, dict)
+                    or any(auth_receipt.get(field) != person_auth.get(field)
+                           for field in ("issuer", "subject", "jti", "auth_time", "recipient_id"))
+                    or not isinstance(auth_receipt.get("verified_at"), int)
+                    or isinstance(auth_receipt.get("verified_at"), bool)):
+                continue
         if (receipt.get("validator_id") != node_id
                 or receipt.get("watermark_id") != watermark_id
                 or (declared_backend and receipt.get("ledger_backend") != declared_backend)
@@ -152,6 +171,10 @@ def verify_bundle(bundle: dict, identity_db: str | None = None,
                 continue
             if previous_event_id is not None and transfer.get("parent_transfer_event_id") != previous_event_id:
                 errors.append(f"Transfer hop {hop_number}: parent link does not match the preceding event.")
+            if hop_number > 1:
+                prior_acceptance = transfer_trail[hop_number - 2].get("acceptance", {}).get("record", {})
+                if transfer.get("parent_acceptance_event_id") != prior_acceptance.get("event_id"):
+                    errors.append(f"Transfer hop {hop_number}: holder acceptance link does not match the preceding hop.")
             if hop_number > 1:
                 prior_transfer = transfer_trail[hop_number - 2]["record"]
                 if (prior_transfer.get("to_id") != transfer.get("from_id")
@@ -208,6 +231,84 @@ def verify_bundle(bundle: dict, identity_db: str | None = None,
                 hop_nodes.add(node_id)
             if len(hop_nodes) < required_quorum:
                 errors.append(f"Transfer hop {hop_number}: only {len(hop_nodes)} distinct pinned validator receipts and chain proofs verify; {required_quorum} are required.")
+
+            acceptance = hop.get("acceptance") or {}
+            try:
+                accepted = acceptance["record"]
+                accepted_id = accepted["event_id"]
+                accepted_bytes = serialize_record(accepted)
+                accepted_signature = bytes.fromhex(acceptance["signature_hex"])
+                accepted_identity = acceptance["recipient_public_identity"]
+                if (accepted.get("event_type") != "handoff_acceptance"
+                        or accepted.get("event_id") != accepted_id
+                        or accepted.get("transfer_event_id") != transfer_id
+                        or accepted.get("recipient_id") != transfer.get("to_id")
+                        or accepted.get("doc_id") != transfer.get("doc_id")
+                        or accepted.get("package_id") != transfer.get("target_package_id")
+                        or accepted.get("package_sha256") != transfer.get("target_package_sha256")
+                        or accepted.get("document_sha256") != transfer.get("target_document_sha256")
+                        or acceptance_event_id(transfer_id, accepted.get("recipient_id", ""),
+                                              accepted.get("package_id", ""),
+                                              accepted.get("package_sha256", "")) != accepted_id
+                        or accepted_identity.get("recipient_id") != accepted.get("recipient_id")
+                        or accepted_identity.get("key_version") != accepted.get("key_version")
+                        or not verify_record(accepted_bytes, accepted_signature,
+                                             accepted_identity["sig_alg"],
+                                             bytes.fromhex(accepted_identity["sig_public"]))):
+                    errors.append(f"Transfer hop {hop_number}: recipient acceptance signature or package binding is invalid.")
+                if identity_db:
+                    trusted_acceptor = lookup_identity(
+                        accepted["recipient_id"], db_path=identity_db,
+                        key_version=accepted["key_version"], allow_revoked=True,
+                    )
+                    if (trusted_acceptor["sig_alg"] != accepted_identity["sig_alg"]
+                            or trusted_acceptor["sig_public"] != accepted_identity["sig_public"]):
+                        errors.append(f"Transfer hop {hop_number}: acceptance key does not match the trusted registry.")
+
+                acceptance_nodes = set()
+                acceptance_evidence = acceptance.get("validator_evidence", [])
+                acceptance_proofs = acceptance.get("validator_chain_proofs", [])
+                for acceptance_index, acceptance_proof in enumerate(acceptance_proofs):
+                    if (acceptance_index >= len(acceptance_evidence)
+                            or not verify_chain_proof(acceptance_proof, accepted_id)
+                            or not acceptance_proof):
+                        continue
+                    tail = acceptance_proof[-1]
+                    if (tail.get("watermark_id") != accepted_id
+                            or tail.get("record_json") != accepted_bytes.decode("utf-8")
+                            or tail.get("signature_hex") != acceptance["signature_hex"]):
+                        continue
+                    item = acceptance_evidence[acceptance_index]
+                    node_id = item.get("validator_id")
+                    receipt = item.get("receipt") or {}
+                    validator_key = item.get("validator_public_key")
+                    if not node_id or not validator_key:
+                        continue
+                    pinned = trusted_validators.get(node_id)
+                    if config.REQUIRE_TRUSTED_VALIDATORS and not pinned:
+                        continue
+                    validator_alg = item.get("validator_sig_alg") or receipt.get("validator_sig_alg")
+                    if pinned and not config.validator_key_is_trusted(node_id, validator_key, validator_alg):
+                        continue
+                    if not verify_receipt(receipt, item.get("receipt_signature_hex", ""),
+                                          validator_key, validator_alg):
+                        continue
+                    if (receipt.get("validator_id") != node_id
+                            or receipt.get("watermark_id") != accepted_id
+                            or receipt.get("entry_hash") != tail.get("entry_hash")
+                            or receipt.get("sequence") != tail.get("id")
+                            or receipt.get("prev_hash") != tail.get("prev_hash")
+                            or receipt.get("committed_at") != tail.get("committed_at")
+                            or receipt.get("entry_hash") != item.get("entry_hash")
+                            or receipt.get("record_hash") != hashlib.sha256(accepted_bytes).hexdigest()
+                            or receipt.get("signature_hash") != hashlib.sha256(accepted_signature).hexdigest()
+                            or (declared_backend and receipt.get("ledger_backend") != declared_backend)):
+                        continue
+                    acceptance_nodes.add(node_id)
+                if len(acceptance_nodes) < required_quorum:
+                    errors.append(f"Transfer hop {hop_number}: only {len(acceptance_nodes)} distinct pinned validator receipts and chain proofs verify the recipient acceptance; {required_quorum} are required.")
+            except (KeyError, TypeError, ValueError, OSError, sqlite3.Error) as exc:
+                errors.append(f"Transfer hop {hop_number}: recipient acceptance evidence is malformed or unverifiable ({exc}).")
             previous_event_id = transfer_id
         except (KeyError, TypeError, ValueError, OSError, sqlite3.Error) as exc:
             errors.append(f"Transfer hop {hop_number}: malformed or unverifiable evidence ({exc}).")
@@ -216,7 +317,9 @@ def verify_bundle(bundle: dict, identity_db: str | None = None,
         if (record.get("transfer_event_id") != last_hop.get("event_id")
                 or last_hop.get("to_id") != record.get("recipient_id")
                 or last_hop.get("doc_id") != record.get("doc_id")
-                or last_hop.get("target_package_id") != record.get("package_id")):
+                or last_hop.get("target_package_id") != record.get("package_id")
+                or record.get("handoff_acceptance_event_id")
+                    != transfer_trail[-1].get("acceptance", {}).get("record", {}).get("event_id")):
             errors.append("Transfer trail endpoint does not match the signed decryption session.")
     return not errors, errors
 
@@ -226,12 +329,14 @@ def main() -> int:
     parser.add_argument("bundle", help="Path to the downloaded SigilChain evidence JSON")
     parser.add_argument("--identity-db", help="Trusted SQLite identity registry for checking recipient key binding")
     parser.add_argument("--validator-trust", help="Pinned validator ID-to-public-key JSON roster")
+    parser.add_argument("--tpm-verifier-key", help="Pinned TPM verifier Ed25519 public key in hex")
     args = parser.parse_args()
 
     with open(args.bundle, encoding="utf-8") as f:
         bundle = json.load(f)
     valid, errors = verify_bundle(bundle, identity_db=args.identity_db,
-                                  validator_trust_file=args.validator_trust)
+                                  validator_trust_file=args.validator_trust,
+                                  tpm_verifier_key=args.tpm_verifier_key)
     if valid:
         print("Evidence checks passed: recipient signature, transfer trail (if present), pinned validator receipts, and ledger chain proofs verify.")
         if bundle.get("ledger_backend") == "etcd-raft":
@@ -240,6 +345,8 @@ def main() -> int:
             print("Validator receipt times are each validator's reported local clock; this bundle does not establish a shared Raft consensus log or trusted timestamp.")
         if not args.identity_db:
             print("Identity note: the included key was not checked against a trusted enrollment registry.")
+        if bundle.get("tpm_attestation_evidence") and not args.tpm_verifier_key:
+            print("TPM note: validator-signed TPM decision data is present, but pass --tpm-verifier-key to independently verify and pin the TPM verifier signature.")
         return 0
     print("Evidence checks failed:")
     for error in errors:

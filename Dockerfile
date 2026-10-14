@@ -32,6 +32,7 @@ COPY agent /app/agent
 COPY crypto /app/crypto
 COPY trace_console /app/trace_console
 COPY validator /app/validator
+COPY security /app/security
 COPY watermark /app/watermark
 COPY config.py /app/config.py
 COPY scripts /app/scripts
@@ -49,6 +50,7 @@ COPY agent /app/agent
 COPY crypto /app/crypto
 COPY trace_console /app/trace_console
 COPY validator /app/validator
+COPY security /app/security
 COPY watermark /app/watermark
 COPY config.py /app/config.py
 COPY scripts /app/scripts

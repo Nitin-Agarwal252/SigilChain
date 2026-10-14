@@ -27,7 +27,9 @@ import oqs
 def build_record(doc_id: str, recipient_id: str, watermark_id: str,
                   marked_pdf_bytes: bytes, timestamp: int | None = None,
                   key_version: int = 1, package_id: str | None = None,
-                  transfer_event_id: str | None = None) -> bytes:
+                  transfer_event_id: str | None = None,
+                  handoff_acceptance_event_id: str | None = None,
+                  person_auth: dict | None = None) -> bytes:
     """
     Build the deterministic byte string that gets signed. Returns raw bytes,
     not a dict — the caller signs exactly this, and a verifier must
@@ -48,6 +50,10 @@ def build_record(doc_id: str, recipient_id: str, watermark_id: str,
         record["package_id"] = package_id
     if transfer_event_id is not None:
         record["transfer_event_id"] = transfer_event_id
+    if handoff_acceptance_event_id is not None:
+        record["handoff_acceptance_event_id"] = handoff_acceptance_event_id
+    if person_auth is not None:
+        record["person_auth"] = person_auth
     return serialize_record(record)
 
 
